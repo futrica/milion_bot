@@ -21,14 +21,14 @@ http_interactions:
       string: '{"question":"Will BTC reach $100k by end of 2026?","tokens":[{"token_id":"token_yes_001"},{"token_id":"token_no_002"}]}'
   recorded_at: 'Mon, 17 Mar 2026 20:00:00 GMT'
 - request:
-    method: get
-    uri: https://clob.polymarket.com/orderbook/token_yes_001
+    method: post
+    uri: https://clob.polymarket.com/books
     body:
       encoding: UTF-8
-      string: ''
+      string: '[{"token_id":"token_yes_001"},{"token_id":"token_no_002"}]'
     headers:
-      User-Agent:
-      - Faraday v2.9.0
+      Content-Type:
+      - application/json
   response:
     status:
       code: 200
@@ -38,26 +38,6 @@ http_interactions:
       - application/json
     body:
       encoding: UTF-8
-      string: '{"bids":[],"asks":[]}'
-  recorded_at: 'Mon, 17 Mar 2026 20:00:00 GMT'
-- request:
-    method: get
-    uri: https://clob.polymarket.com/orderbook/token_no_002
-    body:
-      encoding: UTF-8
-      string: ''
-    headers:
-      User-Agent:
-      - Faraday v2.9.0
-  response:
-    status:
-      code: 200
-      message: OK
-    headers:
-      Content-Type:
-      - application/json
-    body:
-      encoding: UTF-8
-      string: '{"bids":[],"asks":[]}'
+      string: '[{"asset_id":"token_yes_001","bids":[],"asks":[]},{"asset_id":"token_no_002","bids":[],"asks":[]}]'
   recorded_at: 'Mon, 17 Mar 2026 20:00:00 GMT'
 recorded_with: VCR 6.3.0

@@ -14,12 +14,12 @@ end
 # Connection & HTTP status codes
 # ---------------------------------------------------------------------------
 class TestConnection < Minitest::Test
-  def test_successful_scan_hits_market_and_orderbook_endpoints
+  def test_successful_scan_hits_market_then_batch_books_endpoint
     with_cassette("market_btc") do
       scanner = MarketScanner::Scanner.new(condition_id: CONDITION_ID)
       payload = scanner.scan
 
-      # Both CLOB endpoints were exercised (VCR would raise if they weren't)
+      # GET /markets + POST /books — VCR raises if either is missing
       refute_nil payload
     end
   end

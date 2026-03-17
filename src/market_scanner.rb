@@ -3,6 +3,12 @@ require "json"
 require "dotenv/load"
 
 # Polymarket CLOB (Central Limit Order Book) public API
+# Rate limits (market data endpoints): 1,500 req / 10s — no sleep needed.
+#
+# WebSocket alternative (real-time streaming, multiple assets in one connection):
+#   wss://ws-subscriptions-clob.polymarket.com/ws/market
+#   Subscribe with: { type: "market", assets_ids: [...], initial_dump: true }
+#   Send PING every 10s; server replies PONG.
 CLOB_BASE_URL = "https://clob.polymarket.com"
 
 module MarketScanner
@@ -11,14 +17,15 @@ module MarketScanner
       @condition_id     = condition_id
       @analysis_endpoint = analysis_endpoint
       @clob = Faraday.new(url: CLOB_BASE_URL) do |f|
+        f.request  :json
         f.response :raise_error
         f.adapter  Faraday.default_adapter
       end
     end
 
     def scan
-      market   = fetch_market
-      orderbook = fetch_orderbook(market[:token_ids])
+      market    = fetch_market
+      orderbook = fetch_orderbook_batch(market[:token_ids])
 
       payload = build_payload(market, orderbook)
       puts JSON.pretty_generate(payload)
@@ -38,21 +45,25 @@ module MarketScanner
       { token_ids:, description: data[:question] }
     end
 
-    # GET /orderbook/{token_id} for each outcome (YES / NO)
-    def fetch_orderbook(token_ids)
-      token_ids.map.with_index do |token_id, idx|
-        resp = @clob.get("/orderbook/#{token_id}")
-        book = JSON.parse(resp.body, symbolize_names: true)
+    # POST /books — single request for all token IDs (batch endpoint).
+    # Returns the same shape as multiple GET /orderbook calls but in one round-trip.
+    def fetch_orderbook_batch(token_ids)
+      return [] if token_ids.empty?
 
+      body = token_ids.map { |id| { token_id: id } }
+      resp = @clob.post("/books", body)
+      books = JSON.parse(resp.body, symbolize_names: true)
+
+      books.map.with_index do |book, idx|
         best_bid = best_price(book[:bids])
         best_ask = best_price(book[:asks], :asc)
         liquidity = total_liquidity(book[:bids]) + total_liquidity(book[:asks])
 
         {
-          outcome:   idx == 0 ? "YES" : "NO",
-          token_id:,
-          buy_price:  best_ask,   # price you pay to buy YES
-          sell_price: best_bid,   # price you receive when selling YES
+          outcome:    idx == 0 ? "YES" : "NO",
+          token_id:   book[:asset_id],
+          buy_price:  best_ask,
+          sell_price: best_bid,
           spread:     best_ask && best_bid ? (best_ask - best_bid).round(4) : nil,
           liquidity:  liquidity.round(2)
         }
