@@ -1,0 +1,63 @@
+---
+http_interactions:
+- request:
+    method: get
+    uri: https://clob.polymarket.com/markets/0xabc123def456
+    body:
+      encoding: UTF-8
+      string: ''
+    headers:
+      User-Agent:
+      - Faraday v2.9.0
+  response:
+    status:
+      code: 200
+      message: OK
+    headers:
+      Content-Type:
+      - application/json
+    body:
+      encoding: UTF-8
+      string: '{"question":"Will BTC reach $100k by end of 2026?","tokens":[{"token_id":"token_yes_001"},{"token_id":"token_no_002"}]}'
+  recorded_at: '2026-03-17T20:00:00Z'
+- request:
+    method: get
+    uri: https://clob.polymarket.com/orderbook/token_yes_001
+    body:
+      encoding: UTF-8
+      string: ''
+    headers:
+      User-Agent:
+      - Faraday v2.9.0
+  response:
+    status:
+      code: 200
+      message: OK
+    headers:
+      Content-Type:
+      - application/json
+    body:
+      encoding: UTF-8
+      string: '{"bids":[{"price":"0.71","size":"500"},{"price":"0.69","size":"200"}],"asks":[{"price":"0.73","size":"300"},{"price":"0.75","size":"150"}]}'
+  recorded_at: '2026-03-17T20:00:00Z'
+- request:
+    method: get
+    uri: https://clob.polymarket.com/orderbook/token_no_002
+    body:
+      encoding: UTF-8
+      string: ''
+    headers:
+      User-Agent:
+      - Faraday v2.9.0
+  response:
+    status:
+      code: 200
+      message: OK
+    headers:
+      Content-Type:
+      - application/json
+    body:
+      encoding: UTF-8
+      string: '{"bids":[{"price":"0.27","size":"400"}],"asks":[{"price":"0.29","size":"600"}]}'
+  recorded_at: '2026-03-17T20:00:00Z'
+recorded_with: VCR 6.3.0
