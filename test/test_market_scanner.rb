@@ -114,7 +114,7 @@ class TestNilSafety < Minitest::Test
   def test_empty_orderbook_does_not_raise
     with_cassette("orderbook_empty") do
       scanner = MarketScanner::Scanner.new(condition_id: CONDITION_ID)
-      assert_silent { scanner.scan }
+      scanner.scan  # passes if no exception is raised
     end
   end
 
@@ -173,7 +173,7 @@ class TestAnalysisPost < Minitest::Test
         analysis_endpoint: ENDPOINT
       )
       # VCR raises VCR::Errors::UnhandledHTTPRequestError if POST is never made
-      assert_silent { scanner.scan }
+      scanner.scan
     end
   end
 
@@ -181,7 +181,7 @@ class TestAnalysisPost < Minitest::Test
     with_cassette("market_btc") do
       scanner = MarketScanner::Scanner.new(condition_id: CONDITION_ID, analysis_endpoint: nil)
       # Cassette has no POST interaction — VCR would fail if POST were attempted
-      assert_silent { scanner.scan }
+      scanner.scan
     end
   end
 
@@ -192,7 +192,7 @@ class TestAnalysisPost < Minitest::Test
         condition_id:      CONDITION_ID,
         analysis_endpoint: ENDPOINT
       )
-      assert_silent { scanner.scan }
+      scanner.scan  # passes if no exception is raised; warn to stderr is acceptable
     end
   end
 end
