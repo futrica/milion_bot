@@ -19,5 +19,5 @@ http_interactions:
     body:
       encoding: UTF-8
       string: '{"question":"Empty market","tokens":[]}'
-  recorded_at: '2026-03-17T20:00:00Z'
+  recorded_at: 'Mon, 17 Mar 2026 20:00:00 GMT'
 recorded_with: VCR 6.3.0
