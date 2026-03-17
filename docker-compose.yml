@@ -1,0 +1,40 @@
+services:
+
+  # ─── Market Scanner ────────────────────────────────────────────────────────
+  # Polls Polymarket CLOB every SCAN_INTERVAL seconds, writes trades to the
+  # shared volume so SelfImprove can read them.
+  bot:
+    build: .
+    container_name: milion_bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - trade_memory:/app/data      # ← persistent trade history
+      - ./config:/app/config        # ← trade_params.json (patched by self_improve)
+    command: ruby src/market_scanner.rb
+
+  # ─── Self-Improvement Orchestrator ────────────────────────────────────────
+  # Monitors win_rate every CHECK_INTERVAL seconds. If it drops below
+  # WIN_RATE_THRESHOLD, calls Claude (Engineer Agent) to patch trade_params.json
+  # and restarts the bot container automatically.
+  self_improve:
+    build: .
+    container_name: milion_self_improve
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - trade_memory:/app/data                          # same trade history
+      - ./config:/app/config                            # writes patched params here
+      - /var/run/docker.sock:/var/run/docker.sock       # lets it restart `bot`
+    command: ruby src/self_improve.rb
+    depends_on:
+      - bot
+
+volumes:
+
+  # Persistent trade memory — survives container restarts, rebuilds and deploys.
+  # Mount a host path instead of a named volume if you want direct file access:
+  #   driver: local
+  #   driver_opts: { type: none, o: bind, device: ./data }
+  trade_memory:
+    driver: local
