@@ -3,6 +3,7 @@ require "json"
 require "dotenv/load"
 require_relative "analyst"
 require_relative "slack_notifier"
+require_relative "order_executor"
 
 # Polymarket CLOB (Central Limit Order Book) public API
 # Rate limits (market data endpoints): 1,500 req / 10s — no sleep needed.
@@ -22,6 +23,7 @@ module MarketScanner
       @condition_id      = condition_id
       @analysis_endpoint = analysis_endpoint
       @analyst           = Analyst::Client.new
+      @executor          = ENV["WALLET_PRIVATE_KEY"] ? OrderExecutor::Executor.new : nil
       @clob = Faraday.new(url: CLOB_BASE_URL) do |f|
         f.request  :json
         f.response :raise_error
@@ -137,15 +139,30 @@ module MarketScanner
       edge       = analysis[:edge].to_f.abs
 
       if confidence >= params["min_confidence"] && edge >= params["min_edge"]
-        record_trade(payload, analysis)
-        notify_slack(market[:description], yes_outcome, btc, analysis)
+        order = execute_order(yes_outcome, analysis, params)
+        record_trade(payload, analysis, order)
+        notify_slack(market[:description], yes_outcome, btc, analysis, order)
       end
+    end
+
+    # -------------------------------------------------------------------------
+    # Place order on Polymarket via CLOB API
+    # -------------------------------------------------------------------------
+    def execute_order(yes_outcome, analysis, params)
+      return nil unless @executor
+
+      side     = analysis[:recommendation].to_s == "BUY_YES" ? :buy : :sell
+      token_id = yes_outcome[:token_id]
+      price    = yes_outcome[:buy_price]
+      size     = params["max_position_usdc"]
+
+      @executor.place_order(token_id:, side:, price:, size_usdc: size)
     end
 
     # -------------------------------------------------------------------------
     # Persist trade to data/trades.json for self_improve.rb
     # -------------------------------------------------------------------------
-    def record_trade(payload, analysis)
+    def record_trade(payload, analysis, order = nil)
       trades = File.exist?(TRADES_FILE) ? JSON.parse(File.read(TRADES_FILE), symbolize_names: true) : []
       trades << {
         condition_id:   @condition_id,
@@ -155,6 +172,8 @@ module MarketScanner
         edge:           analysis[:edge],
         confidence:     analysis[:confidence],
         yes_price:      payload[:market_price].find { |o| o[:outcome] == "YES" }&.dig(:buy_price),
+        order_id:       order&.dig(:orderID),
+        order_status:   order&.dig(:status),
         result:         nil  # filled in later when market resolves
       }
       File.write(TRADES_FILE, JSON.pretty_generate(trades))
@@ -165,9 +184,17 @@ module MarketScanner
     # -------------------------------------------------------------------------
     # Slack notification (image 4 format)
     # -------------------------------------------------------------------------
-    def notify_slack(description, yes_outcome, btc, analysis)
+    def notify_slack(description, yes_outcome, btc, analysis, order = nil)
       delta_str = btc[:delta_5m] ? "#{btc[:delta_5m] >= 0 ? '+' : ''}#{btc[:delta_5m]}%" : "N/A"
       no_price  = yes_outcome[:buy_price] ? (1 - yes_outcome[:buy_price]).round(4) : "N/A"
+
+      order_info = order ? {
+        side:    analysis[:recommendation],
+        price:   yes_outcome[:buy_price],
+        size:    order[:size] || "?",
+        status:  order[:status],
+        pnl_24h: "pending"
+      } : nil
 
       msg = SlackNotifier.format_scan(
         market:    description,
@@ -175,7 +202,8 @@ module MarketScanner
         yes_price: yes_outcome[:buy_price],
         no_price:,
         btc_delta: delta_str,
-        analysis:
+        analysis:,
+        order:     order_info
       )
       SlackNotifier.send(msg)
     end
