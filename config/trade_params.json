@@ -1,9 +1,10 @@
 {
   "min_edge": 0.10,
   "min_confidence": 0.7,
-  "max_position_usdc": 100,
+  "max_position_usdc": 1,
   "min_liquidity": 500,
   "scan_interval_seconds": 10,
+  "act_seconds_before_close": 90,
   "updated_at": null,
   "updated_by": null
 }

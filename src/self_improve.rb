@@ -1,11 +1,11 @@
 require "faraday"
 require "json"
 require "dotenv/load"
+require_relative "database"
 
 ANTHROPIC_URL      = "https://api.anthropic.com"
-TRADES_FILE        = ENV.fetch("TRADES_FILE",  "/app/data/trades.json")
-PARAMS_FILE        = ENV.fetch("PARAMS_FILE",  "/app/config/trade_params.json")
-SCANNER_SRC        = ENV.fetch("SCANNER_SRC",  "/app/src/market_scanner.rb")
+PARAMS_FILE        = ENV.fetch("PARAMS_FILE",  "config/trade_params.json")
+SCANNER_SRC        = ENV.fetch("SCANNER_SRC",  "src/market_scanner.rb")
 WIN_RATE_THRESHOLD = (ENV["WIN_RATE_THRESHOLD"] || 0.55).to_f
 CHECK_INTERVAL     = (ENV["SELF_IMPROVE_INTERVAL"] || 300).to_i   # seconds
 RECENT_TRADE_LIMIT = 20
@@ -26,21 +26,25 @@ module SelfImprove
     # 1. Evaluate win rate
     # -------------------------------------------------------------------------
     def check_and_improve
-      trades   = load_trades
-      closed   = trades.select { |t| t[:result] }
+      win_stats      = Database.win_rate
+      accuracy_stats = Database.scan_accuracy
 
-      if closed.empty?
+      if win_stats.nil?
         puts "[SelfImprove] No closed trades yet — skipping."
+        if accuracy_stats
+          puts "[SelfImprove] Claude scan accuracy so far: " \
+               "#{(accuracy_stats[:accuracy] * 100).round(1)}% (#{accuracy_stats[:total]} resolved)"
+        end
         return
       end
 
-      win_rate = closed.count { |t| t[:result] == "win" }.to_f / closed.size
-      puts "[SelfImprove] Win rate: #{(win_rate * 100).round(1)}% (#{closed.size} closed trades)"
+      puts "[SelfImprove] Win rate: #{(win_stats[:rate] * 100).round(1)}% (#{win_stats[:total]} closed trades)"
+      puts "[SelfImprove] Claude scan accuracy: #{accuracy_stats ? "#{(accuracy_stats[:accuracy] * 100).round(1)}% (#{accuracy_stats[:total]} resolved)" : "n/a"}"
 
-      return if win_rate >= WIN_RATE_THRESHOLD
+      return if win_stats[:rate] >= WIN_RATE_THRESHOLD
 
       warn "[SelfImprove] Below threshold! Dispatching Engineer Agent..."
-      patch = call_engineer_agent(trades, win_rate)
+      patch = call_engineer_agent(win_stats, accuracy_stats)
       return unless patch
 
       apply_patch(patch)
@@ -50,26 +54,24 @@ module SelfImprove
     # -------------------------------------------------------------------------
     # 2. Load trades from persistent storage
     # -------------------------------------------------------------------------
-    def load_trades
-      return [] unless File.exist?(TRADES_FILE)
-
-      JSON.parse(File.read(TRADES_FILE), symbolize_names: true)
-    rescue JSON::ParserError => e
-      warn "[SelfImprove] Could not parse trades file: #{e.message}"
-      []
-    end
 
     # -------------------------------------------------------------------------
     # 3. Call Claude (Engineer Agent) to suggest parameter patch
     # -------------------------------------------------------------------------
-    def call_engineer_agent(trades, win_rate)
-      code          = File.read(SCANNER_SRC)
+    def call_engineer_agent(win_stats, accuracy_stats)
+      code           = File.read(SCANNER_SRC)
       current_params = JSON.parse(File.read(PARAMS_FILE))
-      recent_trades  = trades.last(RECENT_TRADE_LIMIT)
+      recent_trades  = Database.recent_trades(limit: RECENT_TRADE_LIMIT)
+      recent_scans   = Database.resolved_scans(limit: RECENT_TRADE_LIMIT)
+
+      accuracy_line = accuracy_stats ?
+        "Claude directional accuracy: #{(accuracy_stats[:accuracy] * 100).round(1)}% (#{accuracy_stats[:total]} resolved scans)" :
+        "Claude directional accuracy: insufficient data"
 
       prompt = <<~PROMPT
-        The Polymarket trading bot's win rate dropped to #{(win_rate * 100).round(1)}%,
+        The Polymarket trading bot's win rate dropped to #{(win_stats[:rate] * 100).round(1)}%,
         below the #{(WIN_RATE_THRESHOLD * 100).to_i}% threshold.
+        #{accuracy_line}
 
         ## Current trade parameters
         #{JSON.pretty_generate(current_params)}
@@ -79,12 +81,16 @@ module SelfImprove
         #{code}
         ```
 
-        ## Last #{RECENT_TRADE_LIMIT} closed trades
+        ## Last #{recent_trades.size} closed trades
         #{JSON.pretty_generate(recent_trades)}
 
+        ## Last #{recent_scans.size} resolved scans (all signals including HOLDs)
+        #{JSON.pretty_generate(recent_scans)}
+
         ## Task
-        Analyse the losing trades. Identify the root cause (bad edge filter, poor
-        liquidity threshold, wrong scan interval, etc.) and propose adjusted parameters.
+        Analyse the losing trades and scan accuracy. Identify the root cause (bad edge
+        filter, poor liquidity threshold, miscalibrated confidence, wrong scan interval,
+        etc.) and propose adjusted parameters.
 
         Return ONLY valid JSON matching this schema exactly:
         {
@@ -147,10 +153,7 @@ module SelfImprove
     # 5. Restart the scanner container so it picks up the new params
     # -------------------------------------------------------------------------
     def restart_bot
-      cmd = "docker compose restart bot"
-      puts "[SelfImprove] Running: #{cmd}"
-      success = system(cmd)
-      warn "[SelfImprove] Restart failed — check Docker socket mount" unless success
+      puts "[SelfImprove] Parameters updated — restart market_scanner.rb to apply changes."
     end
 
     def anthropic_client

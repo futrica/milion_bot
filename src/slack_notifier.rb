@@ -2,7 +2,7 @@ require "faraday"
 require "json"
 
 module SlackNotifier
-  SLACK_API = "https://slack.com/api"
+  SLACK_API = "https://slack.com/api/"
 
   def self.send(text)
     token   = ENV.fetch("SLACK_BOT_TOKEN")
@@ -15,7 +15,7 @@ module SlackNotifier
     end
 
     conn.post(
-      "/chat.postMessage",
+      "chat.postMessage",
       { channel:, text:, unfurl_links: false },
       { "Authorization" => "Bearer #{token}" }
     )

@@ -69,6 +69,11 @@ module OrderExecutor
       nil
     end
 
+    # Exposed for balance fetching in scanner
+    def auth_headers(timestamp, method, path, body = "")
+      l2_headers(timestamp, method, path, body)
+    end
+
     private
 
     # -------------------------------------------------------------------------
