@@ -44,35 +44,36 @@ def build_l1_signature(key, timestamp, nonce: 0)
   "0x" + sig_bytes.unpack1("H*")
 end
 
-key       = Eth::Key.new(priv: ENV.fetch("WALLET_PRIVATE_KEY"))
-timestamp = Time.now.to_i.to_s
-signature = build_l1_signature(key, timestamp)
+begin
+  key       = Eth::Key.new(priv: ENV.fetch("WALLET_PRIVATE_KEY"))
+  timestamp = Time.now.to_i.to_s
+  signature = build_l1_signature(key, timestamp)
 
-puts "[setup] Wallet address : #{key.address}"
-puts "[setup] Calling GET /auth/derive-api-key ..."
+  puts "[setup] Wallet address : #{key.address}"
+  puts "[setup] Calling GET /auth/derive-api-key ..."
 
-conn = Faraday.new(url: CLOB_BASE_URL) do |f|
-  f.response :raise_error
-  f.adapter  Faraday.default_adapter
-end
+  conn = Faraday.new(url: CLOB_BASE_URL) do |f|
+    f.response :raise_error
+    f.adapter  Faraday.default_adapter
+  end
 
-resp = conn.get("/auth/derive-api-key") do |req|
-  req.headers["POLY_ADDRESS"]   = key.address.to_s
-  req.headers["POLY_SIGNATURE"] = signature
-  req.headers["POLY_TIMESTAMP"] = timestamp
-  req.headers["POLY_NONCE"]     = "0"
-end
+  resp = conn.get("/auth/derive-api-key") do |req|
+    req.headers["POLY_ADDRESS"]   = key.address.to_s
+    req.headers["POLY_SIGNATURE"] = signature
+    req.headers["POLY_TIMESTAMP"] = timestamp
+    req.headers["POLY_NONCE"]     = "0"
+  end
 
-creds = JSON.parse(resp.body, symbolize_names: true)
+  creds = JSON.parse(resp.body, symbolize_names: true)
 
-puts
-puts "Add these to your .env file:"
-puts "─" * 50
-puts "WALLET_PRIVATE_KEY=#{ENV['WALLET_PRIVATE_KEY']}"
-puts "POLY_API_KEY=#{creds[:apiKey]}"
-puts "POLY_API_SECRET=#{creds[:secret]}"
-puts "POLY_API_PASSPHRASE=#{creds[:passphrase]}"
-puts "─" * 50
+  puts
+  puts "Add these to your .env file:"
+  puts "─" * 50
+  puts "WALLET_PRIVATE_KEY=#{ENV['WALLET_PRIVATE_KEY']}"
+  puts "POLY_API_KEY=#{creds[:apiKey]}"
+  puts "POLY_API_SECRET=#{creds[:secret]}"
+  puts "POLY_API_PASSPHRASE=#{creds[:passphrase]}"
+  puts "─" * 50
 rescue Faraday::Error => e
   warn "[setup] Request failed: #{e.message}"
   exit 1
