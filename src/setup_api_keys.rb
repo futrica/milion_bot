@@ -9,6 +9,7 @@ require "eth"
 require "faraday"
 require "json"
 require "dotenv/load"
+require_relative "crypto"
 
 CLOB_BASE_URL = "https://clob.polymarket.com"
 CHAIN_ID      = 137
@@ -39,9 +40,8 @@ def build_l1_signature(key, timestamp, nonce: 0)
     keccak256(AUTH_MESSAGE)
   )
 
-  digest    = keccak256("\x19\x01" + domain_sep + struct_hash)
-  sig_bytes = key.sign(digest)
-  "0x" + sig_bytes.unpack1("H*")
+  digest = keccak256("\x19\x01" + domain_sep + struct_hash)
+  Crypto.sign_digest(ENV.fetch("WALLET_PRIVATE_KEY"), digest)
 end
 
 begin

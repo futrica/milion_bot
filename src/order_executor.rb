@@ -4,6 +4,7 @@ require "json"
 require "securerandom"
 require "openssl"
 require "base64"
+require_relative "crypto"
 
 # Polymarket CTF Exchange on Polygon mainnet
 # Docs: https://docs.polymarket.com/developers/CLOB/orders/create-order
@@ -98,8 +99,7 @@ module OrderExecutor
       struct_hash = keccak256(abi_encode_order(order))
       digest      = keccak256("\x19\x01" + domain_sep + struct_hash)
 
-      sig_bytes = @key.sign(digest)   # 65 bytes: r(32) + s(32) + v(1)
-      "0x" + sig_bytes.unpack1("H*")
+      Crypto.sign_digest(ENV.fetch("WALLET_PRIVATE_KEY"), digest)
     end
 
     def abi_encode_domain
