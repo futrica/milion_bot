@@ -9,7 +9,7 @@ module Crypto
     ctx      = Secp256k1::Context.create
     priv_key = [private_key_hex.delete_prefix("0x")].pack("H*")
     key_pair = ctx.key_pair_from_private_key(priv_key)
-    sig      = ctx.sign_recoverable(digest_bytes, key_pair)
+    sig      = ctx.sign_recoverable(key_pair.private_key, digest_bytes)
 
     compact, recovery_id = sig.compact
     v = 27 + recovery_id
