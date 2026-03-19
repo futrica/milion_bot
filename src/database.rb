@@ -61,8 +61,14 @@ module Database
 
     # Non-destructive migrations for existing DBs
     add_column(db, "scans",  "end_date",  "TEXT")
-    add_column(db, "trades", "size_usdc", "REAL")
-    add_column(db, "trades", "pnl_usdc",  "REAL")
+    add_column(db, "scans",  "strategy",  "TEXT")
+    add_column(db, "scans",  "dry_run",   "INTEGER")
+    add_column(db, "trades", "size_usdc",  "REAL")
+    add_column(db, "trades", "pnl_usdc",   "REAL")
+    add_column(db, "trades", "fill_price", "REAL")
+    add_column(db, "trades", "shares",     "REAL")
+    add_column(db, "trades", "strategy",   "TEXT")
+    add_column(db, "trades", "dry_run",    "INTEGER")
   end
 
   def self.add_column(db, table, column, type)
@@ -80,8 +86,8 @@ module Database
       INSERT INTO scans
         (condition_id, market_question, timestamp, end_date, btc_price, yes_price, no_price,
          liquidity, claude_probability, claude_edge, claude_confidence,
-         recommendation, reasoning, action_taken, resolved, outcome)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         recommendation, reasoning, action_taken, resolved, outcome, strategy, dry_run)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     SQL
     connection.last_insert_row_id
   end
@@ -130,8 +136,9 @@ module Database
     connection.execute(<<~SQL, attrs.values_at(*trade_columns))
       INSERT INTO trades
         (condition_id, timestamp, recommendation, probability, edge,
-         confidence, yes_price, size_usdc, order_id, order_status, result, pnl_usdc)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+         confidence, yes_price, size_usdc, order_id, order_status, result, pnl_usdc,
+         fill_price, shares, strategy, dry_run)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     SQL
     connection.last_insert_row_id
   end
@@ -193,11 +200,12 @@ module Database
   def self.scan_columns
     %i[condition_id market_question timestamp end_date btc_price yes_price no_price
        liquidity claude_probability claude_edge claude_confidence
-       recommendation reasoning action_taken resolved outcome]
+       recommendation reasoning action_taken resolved outcome strategy dry_run]
   end
 
   def self.trade_columns
     %i[condition_id timestamp recommendation probability edge
-       confidence yes_price size_usdc order_id order_status result pnl_usdc]
+       confidence yes_price size_usdc order_id order_status result pnl_usdc
+       fill_price shares strategy dry_run]
   end
 end

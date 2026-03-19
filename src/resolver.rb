@@ -10,26 +10,44 @@ RESOLVER_CLOB_URL = "https://clob.polymarket.com"
 module Resolver
   class << self
     def run(condition_id: nil)
-      pending = condition_id ?
+      # Collect condition_ids from both unresolved scans AND unresolved trades
+      pending_scans = condition_id ?
         Database.unresolved_scans.select { |s| s["condition_id"] == condition_id } :
         Database.unresolved_scans
 
-      return if pending.empty?
+      unresolved_trade_cids = Database.recent_trades(limit: 200)
+        .select { |t| t["result"].nil? && !t["order_id"].nil? }
+        .map { |t| t["condition_id"] }
+        .uniq
 
-      pending.group_by { |s| s["condition_id"] }.each do |cid, group|
-        winner = fetch_winner(cid)
-        next if winner.nil?
+      filter_cid = condition_id
+      all_cids = (pending_scans.map { |s| s["condition_id"] } + unresolved_trade_cids)
+        .uniq
+        .then { |cids| filter_cid ? cids.select { |c| c == filter_cid } : cids }
 
-        group.each do |scan|
-          # Both YES and Up are the "first" outcome (probability > 0.5 = predict first)
+      return if all_cids.empty?
+
+      scans_by_cid = pending_scans.group_by { |s| s["condition_id"] }
+
+      all_cids.each do |cid|
+        result = fetch_winner(cid)
+        next if result.nil?
+
+        winner        = result[:winner]
+        first_outcome = result[:first_outcome]
+
+        # first_outcome is outcomes[0] from the CLOB — it may be "Up", "Down", "Yes", etc.
+        # We compare directly instead of assuming outcomes[0] is always "Up"/"Yes".
+        first_won = winner == first_outcome
+
+        (scans_by_cid[cid] || []).each do |scan|
           predicted_first = scan["claude_probability"].to_f > 0.5
-          actual_first    = winner == "Up" || winner == "Yes" || winner == "YES"
-          outcome         = (predicted_first == actual_first) ? "correct" : "incorrect"
+          outcome         = (predicted_first == first_won) ? "correct" : "incorrect"
           Database.resolve_scan(scan["id"], outcome)
         end
 
-        resolve_trade_pnl(cid, winner)
-        puts "[Resolver] #{cid[0..12]}... → winner: #{winner}"
+        resolve_trade_pnl(cid, winner, first_outcome)
+        puts "[Resolver] #{cid[0..12]}... → winner: #{winner} (first_outcome: #{first_outcome})"
       end
 
       Database.dump
@@ -44,31 +62,47 @@ module Resolver
 
       return nil if data[:active] != false && data[:closed] != true
 
-      winning_token = data[:tokens]&.find { |t| t[:winner] == true }
-      winning_token&.dig(:outcome)
+      tokens        = data[:tokens] || []
+      first_outcome = tokens.first&.dig(:outcome)
+      winning_token = tokens.find { |t| t[:winner] == true }
+      return nil unless winning_token
+
+      { winner: winning_token[:outcome], first_outcome: first_outcome }
     rescue => e
       warn "[Resolver] #{e.message}"
       nil
     end
 
-    def resolve_trade_pnl(condition_id, winner)
+    def resolve_trade_pnl(condition_id, winner, first_outcome)
       trades = Database.recent_trades(limit: 100)
-        .select { |t| t["condition_id"] == condition_id && t["result"].nil? }
+        .select { |t| t["condition_id"] == condition_id && t["result"].nil? && !t["order_id"].nil? }
 
       trades.each do |trade|
-        rec       = trade["recommendation"].to_s
-        size_usdc = trade["size_usdc"].to_f
-        yes_price = trade["yes_price"].to_f
-        next if size_usdc.zero? || yes_price.zero?
+        rec        = trade["recommendation"].to_s
+        size_usdc  = trade["size_usdc"].to_f
+        shares     = trade["shares"].to_f   # actual shares received at fill
+        fill_price = trade["fill_price"].to_f
+        yes_price  = trade["yes_price"].to_f
+        next if size_usdc.zero?
 
-        # BUY_YES = bought UP at yes_price; BUY_NO = bought DOWN at (1 - yes_price)
         bet_on_first = rec == "BUY_YES"
-        won          = bet_on_first == (winner == "Up" || winner == "Yes" || winner == "YES")
+        won          = bet_on_first == (winner == first_outcome)
 
-        entry    = bet_on_first ? yes_price : (1.0 - yes_price)
-        result   = won ? "win" : "loss"
-        pnl_usdc = won ? (size_usdc / entry) - size_usdc : -size_usdc
+        # Use actual fill data when available, fall back to analysis price
+        if won
+          pnl_usdc = if shares > 0
+            shares - size_usdc   # shares pay $1 each at resolution; cost = size_usdc
+          elsif fill_price > 0
+            (size_usdc / fill_price) - size_usdc
+          else
+            entry = bet_on_first ? yes_price : (1.0 - yes_price)
+            entry > 0 ? (size_usdc / entry) - size_usdc : 0.0
+          end
+        else
+          pnl_usdc = -size_usdc
+        end
 
+        result = won ? "win" : "loss"
         Database.update_trade_result(condition_id, result, pnl_usdc.round(4))
       end
     end

@@ -35,6 +35,14 @@ module MarketFinder
       outcomes  = JSON.parse(market["outcomes"])
       token_ids = JSON.parse(market["clobTokenIds"])
 
+      # Normalize so outcomes[0] is always the "positive" outcome (Up/Yes).
+      # Polymarket Gamma API does not guarantee ordering; the CLOB always uses
+      # Up/Yes as the first token, so we must align to avoid win/loss inversions.
+      if outcomes[0] =~ /\A(down|no)\z/i
+        outcomes  = outcomes.reverse
+        token_ids = token_ids.reverse
+      end
+
       return {
         condition_id: market["conditionId"],
         question:     event["title"],

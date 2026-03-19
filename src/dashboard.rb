@@ -21,7 +21,7 @@ module Dashboard
 
   # ── Accumulate logs per window, clear when window changes ───────────────
   def self.log_scan(market:, btc:, up:, analysis:, phase:, time_left:, start_time: nil,
-                    acted:, dry_run: false, min_confidence: 0.70, min_edge: 0.10)
+                    acted:, dry_run: false, min_confidence: 0.70, min_edge: 0.10, strategy: nil)
     cid = market[:condition_id]
     if @current_cid != cid
       @logs        = []
@@ -30,7 +30,8 @@ module Dashboard
 
     ts      = Time.now.utc.strftime("%H:%M:%S")
     ph      = phase.to_s.upcase
-    acted_s = acted   ? " #{G}▶ ORDER#{RST}" : ""
+    acted_s = acted && ph == "OBSERVE" ? " #{G}▶ EARLY#{RST}" :
+              acted                   ? " #{G}▶ ORDER#{RST}" : ""
     dry_s   = dry_run ? " #{Y}[dry]#{RST}"   : ""
 
     now = Time.now
@@ -103,7 +104,9 @@ module Dashboard
 
     # ── Entry thresholds ──
     puts bar("╠", "╣")
-    thresh = "Entry thresholds:  conf #{G}≥ #{min_confidence}#{RST}  │  edge #{G}≥ #{min_edge}#{RST}  │  phase #{M}ACT#{RST}  │  time left #{G}> 30s#{RST}"
+    thresh = "ACT: conf #{G}≥ #{min_confidence}#{RST}  edge #{G}≥ #{min_edge}#{RST}" \
+             "   #{Y}│#{RST}   EARLY: conf #{G}≥ 0.82#{RST}  edge #{G}≥ 0.25#{RST}  after #{G}5pts#{RST}" \
+             "   #{Y}│#{RST}   UP #{G}0.15–0.85#{RST}  time #{G}> 30s#{RST}"
     puts mid(thresh)
 
     puts bar("╠", "╣")

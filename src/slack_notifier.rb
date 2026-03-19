@@ -1,8 +1,10 @@
 require "faraday"
 require "json"
+require_relative "database"
 
 module SlackNotifier
-  SLACK_API = "https://slack.com/api/"
+  SLACK_API              = "https://slack.com/api/"
+  SUMMARY_LOOKBACK_SECONDS = 3600  # envia a cada 1 hora
 
   def self.send(text)
     token   = ENV.fetch("SLACK_BOT_TOKEN")
@@ -23,42 +25,41 @@ module SlackNotifier
     warn "[Slack] Failed to send message: #{e.message}"
   end
 
-  def self.format_scan(market:, scan_time:, yes_price:, no_price:, btc_delta:, analysis:, order: nil)
-    signal_emoji = case analysis[:recommendation]&.to_s
-                   when "BUY_YES" then ":large_green_circle:"
-                   when "BUY_NO"  then ":red_circle:"
-                   else                ":white_circle:"
-                   end
+  def self.send_summary(dry_run: false)
+    all_trades = Database.recent_trades(limit: 500)
+    now        = Time.now.utc
 
-    lines = [
-      "*— Market Scan #{scan_time} UTC —*",
-      "",
-      "Market: #{market}",
-      "YES: `#{yes_price}`  NO: `#{no_price}`",
-      "BTC Δ5m: `#{btc_delta}`",
-      "",
-      "*— Claude Analysis —*",
-      "",
-      "P(up):  `#{analysis[:probability]}`",
-      "Edge:   `#{analysis[:edge]}`",
-      "Conf:   `#{analysis[:confidence]}`",
-      "Signal: #{signal_emoji} *#{analysis[:recommendation]}*",
-      "",
-      "_#{analysis[:reasoning]}_"
-    ]
+    # Últimas 1h
+    since_1h = now - SUMMARY_LOOKBACK_SECONDS
+    last_1h   = all_trades.select { |t| t["result"] && Time.parse(t["timestamp"]) >= since_1h }
 
-    if order
-      status_emoji = order[:status] == "filled" ? ":white_check_mark:" : ":hourglass:"
-      lines += [
-        "",
-        "*— Execution —*",
-        "",
-        "Order:   #{order[:side]} @#{order[:price]} × $#{order[:size]}",
-        "Status:  #{status_emoji} #{order[:status]}",
-        "PnL 24h: `#{order[:pnl_24h]}`"
-      ]
-    end
+    # Hoje (desde meia-noite UTC)
+    since_day = Time.utc(now.year, now.month, now.day)
+    today     = all_trades.select { |t| t["result"] && Time.parse(t["timestamp"]) >= since_day }
 
-    lines.join("\n")
+    # Métricas 1h
+    wins_1h = last_1h.count { |t| t["result"] == "win" }
+    loss_1h = last_1h.count { |t| t["result"] == "loss" }
+    pnl_1h  = last_1h.sum   { |t| t["pnl_usdc"].to_f }.round(2)
+
+    # Métricas do dia
+    wins_day  = today.count { |t| t["result"] == "win" }
+    total_day = today.size
+    pnl_day   = today.sum { |t| t["pnl_usdc"].to_f }.round(2)
+    rate_day  = total_day > 0 ? (wins_day.to_f / total_day * 100).round(1) : nil
+
+    pnl_day_str = "#{pnl_day >= 0 ? "+" : ""}$#{pnl_day}"
+    pnl_1h_str  = "#{pnl_1h >= 0 ? "+" : ""}$#{pnl_1h}"
+    rate_str    = rate_day ? "#{rate_day}% (#{wins_day}W #{total_day - wins_day}L)" : "sem trades"
+    mode        = dry_run ? " _(dry run)_" : ""
+
+    text = "*milion_bot#{mode} — #{now.strftime("%H:%M UTC")}*\n" \
+           "\n" \
+           "*Última 1h:*  #{wins_1h}W #{loss_1h}L  │  PnL #{pnl_1h_str}\n" \
+           "*Hoje:*        #{rate_str}  │  PnL #{pnl_day_str}"
+
+    send(text)
+  rescue => e
+    warn "[Slack] Summary failed: #{e.message}"
   end
 end

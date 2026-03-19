@@ -31,6 +31,8 @@ module OrderExecutor
       @api_key        = ENV.fetch("POLY_API_KEY")
       @api_secret     = ENV.fetch("POLY_API_SECRET")      # base64url-encoded
       @api_passphrase = ENV.fetch("POLY_API_PASSPHRASE")
+      # For social login wallets: maker = main wallet, signer = operator key
+      @proxy_address  = ENV["POLY_MAIN_ADDRESS"]
 
       @http = Faraday.new(url: CLOB_BASE_URL) do |f|
         f.request  :json
@@ -45,20 +47,28 @@ module OrderExecutor
     # price     — YES price (e.g. 0.48)
     # size_usdc — USDC to spend (e.g. 10)
     def place_order(token_id:, side:, price:, size_usdc:)
-      maker_amount = (size_usdc.to_f * 10**USDC_DECIMALS).to_i
+      # CLOB requires: USDC amounts max 2 decimal places (→ multiple of 10_000 raw)
+      #                token amounts max 4 decimal places (→ multiple of 100 raw)
+      usdc_step  = 10_000   # 0.01 USDC in raw units
+      token_step = 100      # 0.0001 tokens in raw units
 
-      # BUY:  spend maker_amount USDC, receive maker_amount/price tokens
-      # SELL: spend maker_amount tokens, receive maker_amount*price USDC
-      taker_amount = side == :buy ?
-        (maker_amount.to_f / price).to_i :
-        (maker_amount.to_f * price).to_i
+      if side == :buy
+        # BUY: maker = USDC, taker = tokens
+        maker_amount = ((size_usdc.to_f * 10**USDC_DECIMALS) / usdc_step).floor * usdc_step
+        taker_amount = ((maker_amount.to_f / price) / token_step).floor * token_step
+      else
+        # SELL: maker = tokens, taker = USDC
+        maker_amount = ((size_usdc.to_f * 10**USDC_DECIMALS) / token_step).floor * token_step
+        taker_amount = ((maker_amount.to_f * price) / usdc_step).floor * usdc_step
+      end
 
       struct    = build_struct(token_id, SIDE[side], maker_amount, taker_amount)
       signature = eip712_sign(struct)
       body      = serialize(struct, signature)
       timestamp = Time.now.to_i.to_s
 
-      resp   = @http.post("/order", body, l2_headers(timestamp, "POST", "/order", body.to_json))
+      puts "[OrderExecutor] Body: #{JSON.pretty_generate(body)}"
+      resp   = @http.post("/order?geo_block_token=", body, l2_headers(timestamp, "POST", "/order", body.to_json))
       result = JSON.parse(resp.body, symbolize_names: true)
 
       puts "[OrderExecutor] #{side.upcase} $#{size_usdc} @ #{price} → " \
@@ -66,6 +76,7 @@ module OrderExecutor
       result
     rescue Faraday::Error => e
       warn "[OrderExecutor] Submission failed: #{e.message}"
+      warn "[OrderExecutor] Response body: #{e.response&.dig(:body)}"
       nil
     end
 
@@ -80,9 +91,15 @@ module OrderExecutor
     # Order struct
     # -------------------------------------------------------------------------
     def build_struct(token_id, side_int, maker_amount, taker_amount)
+      # POLY_PROXY (signatureType=1): maker=main wallet, signer=operator key
+      # EOA        (signatureType=0): maker=signer=operator key (no proxy)
+      proxy         = @proxy_address && !@proxy_address.empty?
+      maker_address = proxy ? @proxy_address : @key.address.to_s
+      sig_type      = proxy ? 2 : 0   # 2 = POLY_GNOSIS_SAFE for social login proxy wallets
+
       {
-        salt:          SecureRandom.random_number(2**64),
-        maker:         @key.address.to_s,
+        salt:          SecureRandom.random_number(10**12),  # keep within JS safe integer range
+        maker:         maker_address,
         signer:        @key.address.to_s,
         taker:         "0x0000000000000000000000000000000000000000",
         tokenId:       token_id.to_s,
@@ -90,9 +107,9 @@ module OrderExecutor
         takerAmount:   taker_amount,
         expiration:    0,
         nonce:         0,
-        feeRateBps:    0,
+        feeRateBps:    1000,
         side:          side_int,
-        signatureType: 0   # EOA
+        signatureType: sig_type
       }
     end
 
@@ -152,7 +169,7 @@ module OrderExecutor
     def serialize(order, signature)
       {
         order: {
-          salt:          order[:salt].to_s,
+          salt:          order[:salt],
           maker:         order[:maker],
           signer:        order[:signer],
           taker:         order[:taker],
@@ -167,7 +184,9 @@ module OrderExecutor
           signature:
         },
         owner:     @api_key,
-        orderType: "GTC"
+        orderType: "FAK",
+        deferExec: false,
+        postOnly:  false
       }
     end
 
