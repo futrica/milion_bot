@@ -9,24 +9,25 @@ require_relative "market_finder"
 require_relative "resolver"
 require_relative "dashboard"
 
-CLOB_BASE_URL = "https://clob.polymarket.com"
-BINANCE_URL   = "https://api.binance.com"
-PARAMS_FILE   = ENV.fetch("PARAMS_FILE", "config/trade_params.json")
+CLOB_BASE_URL   = "https://clob.polymarket.com"
+BINANCE_URL     = "https://api.binance.com"
+PARAMS_FILE     = ENV.fetch("PARAMS_FILE", "config/trade_params.json")
+STRATEGIES_FILE = ENV.fetch("STRATEGIES_FILE", "config/strategies.json")
 
 # Two-phase strategy per 5-min market window:
 #
-#  OBSERVE phase (time_left > ACT_SECONDS_BEFORE_CLOSE):
+#  OBSERVE phase (time_left > strategy[:act_seconds_before_close]):
 #    - Claude runs once at first detection of a new market
 #    - Orderbook + BTC re-scanned every interval to track momentum
 #    - No orders placed
 #
-#  ACT phase (time_left <= ACT_SECONDS_BEFORE_CLOSE):
+#  ACT phase (time_left <= strategy[:act_seconds_before_close]):
 #    - Execute Claude's cached recommendation if confidence + edge thresholds met
 #    - Only one trade per market window
-#    - Skip if time_left < 30s (too late to fill)
+#    - Skip if time_left < strategy[:too_late_seconds]
 #
-ACT_SECONDS_BEFORE_CLOSE = 90  # enter act phase with 90s left
-TOO_LATE_SECONDS          = 30  # skip execution if < 30s left
+# Strategies rotate automatically per market window (round-robin).
+# Each scan/trade is tagged with the active strategy name for comparison.
 
 module MarketScanner
   class Scanner
@@ -45,34 +46,46 @@ module MarketScanner
       @traded_this_market = false
       @balance_usdc       = nil
       @balance_fetched_at = nil
+
+      # Strategy rotation — cycles through all defined strategies, one per market window
+      @strategies      = load_strategies
+      @strategy_index  = 0
+      @current_strategy = @strategies[@strategy_index]
+
+      # Resolve any markets that closed while the bot was offline
+      Resolver.run
     end
 
     def scan(dry_run: false)
       market = find_market
       return unless market
 
-      params     = load_params
+      base_params = load_params
+      strategy    = @current_strategy
+      # Strategy overrides base params for all threshold/timing keys
+      params      = base_params.merge(strategy)
+
       now        = Time.now
       end_date   = market[:end_date]
-      start_time = market[:start_time]   # when 5-min measurement window opens
+      start_time = market[:start_time]
       time_left  = [(end_date - now).to_i, 0].max
 
-      # Phase logic based on measurement window:
-      #   OBSERVE: measurement hasn't started yet OR > ACT_SECONDS before close
-      #   ACT:     measurement started AND within last ACT_SECONDS of window
+      act_secs      = strategy.fetch("act_seconds_before_close", 90)
+      too_late_secs = strategy.fetch("too_late_seconds", 30)
+
       measurement_started = start_time && now >= start_time
-      phase_sym = (measurement_started && time_left <= ACT_SECONDS_BEFORE_CLOSE) ? :act : :observe
+      phase_sym = (measurement_started && time_left <= act_secs) ? :act : :observe
 
       orderbook = fetch_orderbook(market[:token_ids], market[:outcomes])
       btc       = fetch_btc_spot
       up        = orderbook.find { |o| o[:outcome] == market[:outcomes][0] }
+      down      = orderbook.find { |o| o[:outcome] == market[:outcomes][1] }
 
       unless up
         warn "[Scanner] No UP outcome in orderbook"
         return
       end
 
-      # --- Collect series during OBSERVE, call Claude once at ACT start ----
       if phase_sym == :observe
         @observe_series << {
           time:      Time.now.utc.strftime("%H:%M:%S"),
@@ -82,7 +95,13 @@ module MarketScanner
         }
       end
 
-      if phase_sym == :act && @market_analysis.nil?
+      early_min_points = params.fetch("early_entry_min_series_points", 5)
+      should_analyze   = @market_analysis.nil? && (
+        phase_sym == :act ||
+        (phase_sym == :observe && @observe_series.size >= early_min_points)
+      )
+
+      if should_analyze
         series = @observe_series.empty? ? [{
           time: Time.now.utc.strftime("%H:%M:%S"), up_price: up[:buy_price],
           btc_price: btc[:price], delta_5m: btc[:delta_5m]
@@ -96,24 +115,36 @@ module MarketScanner
       analysis = @market_analysis
       phase    = phase_sym
 
-      # --- Decide whether to act ----------------------------------------
+      min_up   = params.fetch("min_up_price", 0.15)
+      max_up   = params.fetch("max_up_price", 0.85)
+      up_price = up[:buy_price].to_f
+      price_ok = up_price >= min_up && up_price <= max_up
+
       act = false
-      if !@traded_this_market && analysis && phase == :act
+      if !@traded_this_market && analysis && price_ok && time_left > too_late_secs
         confidence = analysis[:confidence].to_f
         edge       = analysis[:edge].to_f.abs
-        act = confidence >= params["min_confidence"] &&
-              edge       >= params["min_edge"]       &&
-              time_left  >  TOO_LATE_SECONDS
+
+        act = if phase == :act
+          confidence >= params.fetch("min_confidence", 0.70) &&
+          edge       >= params.fetch("min_edge", 0.10)
+        elsif phase == :observe
+          confidence >= params.fetch("early_entry_min_confidence", 0.82) &&
+          edge       >= params.fetch("early_entry_min_edge", 0.25)
+        else
+          false
+        end
       end
 
-      record_scan(market, up, btc, analysis, act) if analysis
+      warn "[Scanner] Skipping: UP price #{up_price} out of range [#{min_up}, #{max_up}]" if !price_ok && analysis && !@traded_this_market
+
+      record_scan(market, up, btc, analysis, act, strategy["name"], dry_run) if analysis
       balance = dry_run ? simulated_balance : fetch_balance_cached
 
       if act
-        order = dry_run ? nil : execute_order(up, analysis, params)
-        record_trade(market, up, analysis, order, params)
+        order = dry_run ? nil : execute_order(up, down, analysis, params)
+        record_trade(market, up, analysis, order, params, strategy["name"], dry_run)
         @traded_this_market = true
-        notify_slack(market, up, btc, analysis, order) unless dry_run
       end
 
       Dashboard.log_scan(
@@ -126,16 +157,17 @@ module MarketScanner
         start_time:     start_time,
         acted:          act,
         dry_run:        dry_run,
-        min_confidence: params["min_confidence"],
-        min_edge:       params["min_edge"]
+        min_confidence: params.fetch("min_confidence", 0.70),
+        min_edge:       params.fetch("min_edge", 0.10),
+        strategy:       strategy["name"]
       )
       Dashboard.print(
-        next_scan_in:   params["scan_interval_seconds"],
+        next_scan_in:   base_params["scan_interval_seconds"],
         balance_usdc:   balance,
         market_url:     market[:url],
         dry_run:        dry_run,
-        min_confidence: params["min_confidence"],
-        min_edge:       params["min_edge"]
+        min_confidence: params.fetch("min_confidence", 0.70),
+        min_edge:       params.fetch("min_edge", 0.10)
       )
     end
 
@@ -149,16 +181,37 @@ module MarketScanner
       return nil unless market
 
       if @current_market.nil? || market[:condition_id] != @current_market[:condition_id]
-        # New window — resolve previous, reset state
+        # New window — resolve previous, rotate strategy, reset state
         Resolver.run(condition_id: @current_market[:condition_id]) if @current_market
+        @strategy_index   = (@strategy_index + 1) % @strategies.size
+        @current_strategy = @strategies[@strategy_index]
         @current_market     = market
         @market_analysis    = nil
         @observe_series     = []
         @traded_this_market = false
-        $stderr.puts "\n[Scanner] ▶ New window: #{market[:question]}"
+        $stderr.puts "\n[Scanner] ▶ New window: #{market[:question]}  [strategy: #{@current_strategy["name"]}]"
       end
 
       @current_market
+    end
+
+    # -----------------------------------------------------------------------
+    # Strategies — loaded once, rotated per market window
+    # -----------------------------------------------------------------------
+    def load_strategies
+      return default_strategies unless File.exist?(STRATEGIES_FILE)
+
+      JSON.parse(File.read(STRATEGIES_FILE)).reject { |s| s["_inactive"] }
+    rescue JSON::ParserError
+      default_strategies
+    end
+
+    def default_strategies
+      [{ "name" => "standard_90s", "act_seconds_before_close" => 90,
+         "too_late_seconds" => 30, "min_confidence" => 0.70,
+         "min_edge" => 0.10, "min_up_price" => 0.15, "max_up_price" => 0.85,
+         "early_entry_min_confidence" => 0.82, "early_entry_min_edge" => 0.25,
+         "early_entry_min_series_points" => 5 }]
     end
 
     # -----------------------------------------------------------------------
@@ -232,13 +285,24 @@ module MarketScanner
     # -----------------------------------------------------------------------
     def fetch_balance_cached
       return @balance_usdc if @balance_fetched_at && (Time.now - @balance_fetched_at) < 60
-      return nil unless @executor
 
-      timestamp     = Time.now.to_i.to_s
-      headers       = @executor.auth_headers(timestamp, "GET", "/balance-allowance")
-      resp          = @clob.get("/balance-allowance", { asset_type: "COLLATERAL" }, headers)
-      data          = JSON.parse(resp.body, symbolize_names: true)
-      @balance_usdc = data[:balance].to_f / 1_000_000
+      # Query USDC.e balance of proxy wallet directly from Polygon blockchain
+      # Funds live in the proxy wallet (Gnosis Safe), not the operator key
+      proxy  = ENV["POLY_MAIN_ADDRESS"]
+      return nil unless proxy && !proxy.empty?
+
+      usdc_contract = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+      padded_addr   = proxy.delete_prefix("0x").downcase.rjust(64, "0")
+      data          = "0x70a08231" + padded_addr   # balanceOf(address)
+
+      rpc = Faraday.new(url: "https://polygon-bor-rpc.publicnode.com") { |f| f.request :json; f.adapter Faraday.default_adapter }
+      resp = rpc.post("/", { jsonrpc: "2.0", method: "eth_call",
+                             params: [{ to: usdc_contract, data: data }, "latest"], id: 1 })
+      result = JSON.parse(resp.body, symbolize_names: true)
+      raise "RPC error: #{result[:error]}" if result[:error]
+
+      hex = result[:result].delete_prefix("0x")
+      @balance_usdc = hex.to_i(16).to_f / 1_000_000
       @balance_fetched_at = Time.now
       @balance_usdc
     rescue => e
@@ -249,21 +313,22 @@ module MarketScanner
     # -----------------------------------------------------------------------
     # Order execution
     # -----------------------------------------------------------------------
-    def execute_order(up_outcome, analysis, params)
+    def execute_order(up_outcome, down_outcome, analysis, params)
       return nil unless @executor
 
-      side     = analysis[:recommendation].to_s == "BUY_YES" ? :buy : :sell
-      token_id = up_outcome[:token_id]
-      price    = up_outcome[:buy_price]
+      buy_yes  = analysis[:recommendation].to_s == "BUY_YES"
+      outcome  = buy_yes ? up_outcome : down_outcome
+      token_id = outcome[:token_id]
+      price    = outcome[:buy_price]
       size     = params["max_position_usdc"]
 
-      @executor.place_order(token_id:, side:, price:, size_usdc: size)
+      @executor.place_order(token_id:, side: :buy, price:, size_usdc: size)
     end
 
     # -----------------------------------------------------------------------
     # Persist trade to DB
     # -----------------------------------------------------------------------
-    def record_trade(market, up_outcome, analysis, order, params)
+    def record_trade(market, up_outcome, analysis, order, params, strategy_name = nil, dry_run = false)
       Database.insert_trade(
         condition_id:   market[:condition_id],
         timestamp:      Time.now.utc.iso8601,
@@ -276,7 +341,15 @@ module MarketScanner
         order_id:       order&.dig(:orderID),
         order_status:   order&.dig(:status),
         result:         nil,
-        pnl_usdc:       nil
+        pnl_usdc:       nil,
+        fill_price:     order ? begin
+                          making = order[:makingAmount].to_f
+                          taking = order[:takingAmount].to_f
+                          taking > 0 ? (making / taking).round(6) : nil
+                        end : nil,
+        shares:         order ? order[:takingAmount].to_f / 1_000_000 : nil,
+        strategy:       strategy_name,
+        dry_run:        dry_run ? 1 : 0
       )
       Database.dump
     rescue => e
@@ -286,7 +359,7 @@ module MarketScanner
     # -----------------------------------------------------------------------
     # Persist every Claude analysis (including HOLDs)
     # -----------------------------------------------------------------------
-    def record_scan(market, up_outcome, btc, analysis, action_taken)
+    def record_scan(market, up_outcome, btc, analysis, action_taken, strategy_name = nil, dry_run = false)
       Database.insert_scan(
         condition_id:       market[:condition_id],
         market_question:    market[:question],
@@ -303,29 +376,13 @@ module MarketScanner
         reasoning:          analysis[:reasoning].to_s,
         action_taken:       action_taken ? 1 : 0,
         resolved:           0,
-        outcome:            nil
+        outcome:            nil,
+        strategy:           strategy_name,
+        dry_run:            dry_run ? 1 : 0
       )
       Database.dump
     rescue => e
       warn "[Scanner] Could not record scan: #{e.message}"
-    end
-
-    # -----------------------------------------------------------------------
-    # Slack
-    # -----------------------------------------------------------------------
-    def notify_slack(market, up_outcome, btc, analysis, order = nil)
-      delta_str  = btc[:delta_5m] ? "#{btc[:delta_5m] >= 0 ? "+" : ""}#{btc[:delta_5m]}%" : "N/A"
-      no_price   = up_outcome[:buy_price] ? (1 - up_outcome[:buy_price]).round(4) : "N/A"
-      order_info = order ? {
-        side: analysis[:recommendation], price: up_outcome[:buy_price],
-        size: order[:size] || "?", status: order[:status], pnl_24h: "pending"
-      } : nil
-
-      SlackNotifier.send(SlackNotifier.format_scan(
-        market: market[:question], scan_time: Time.now.utc.strftime("%H:%M:%S"),
-        yes_price: up_outcome[:buy_price], no_price:,
-        btc_delta: delta_str, analysis:, order: order_info
-      ))
     end
 
     # -----------------------------------------------------------------------
@@ -354,6 +411,16 @@ if __FILE__ == $PROGRAM_NAME
 
   label = dry_run ? "DRY-RUN (simulated $100 bankroll, $1/trade)" : "LIVE"
   puts "[Scanner] #{label} — BTC Up/Down 5m — aligned to #{interval}s grid (Ctrl+C to stop)"
+
+  # Background thread: send Slack summary every SUMMARY_LOOKBACK_SECONDS
+  Thread.new do
+    summary_interval = SlackNotifier::SUMMARY_LOOKBACK_SECONDS
+    loop do
+      sleep summary_interval
+      SlackNotifier.send_summary(dry_run: dry_run)
+    end
+  end
+
   loop do
     begin
       scanner.scan(dry_run: dry_run)

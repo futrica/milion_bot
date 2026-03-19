@@ -1,0 +1,64 @@
+[
+  {
+    "_note": "ATIVA — RECOMENDADA: 72.2% acerto, edge +0.005, boa frequência (5 trades no dry-run 2026-03-18/19)",
+    "name": "standard_90s",
+    "description": "Baseline — thresholds atuais, entra com 90s",
+    "act_seconds_before_close": 90,
+    "too_late_seconds": 30,
+    "min_confidence": 0.70,
+    "min_edge": 0.10,
+    "min_up_price": 0.15,
+    "max_up_price": 0.85,
+    "early_entry_min_confidence": 0.82,
+    "early_entry_min_edge": 0.25,
+    "early_entry_min_series_points": 5
+  }
+
+  ,{
+    "_note": "INATIVA — 78.4% acerto mas 0 trades (muito conservadora). Candidata a ajuste de thresholds no futuro.",
+    "_inactive": true,
+    "name": "strict_90s",
+    "description": "Muito seletivo — só entra com alta confiança",
+    "act_seconds_before_close": 90,
+    "too_late_seconds": 30,
+    "min_confidence": 0.80,
+    "min_edge": 0.18,
+    "min_up_price": 0.20,
+    "max_up_price": 0.80,
+    "early_entry_min_confidence": 0.88,
+    "early_entry_min_edge": 0.30,
+    "early_entry_min_series_points": 6
+  }
+
+  ,{
+    "_note": "INATIVA — 70.3% acerto, 12 trades, edge -0.009. Frequente mas edge negativo.",
+    "_inactive": true,
+    "name": "open_90s",
+    "description": "Permissivo — entra mais frequente, range maior",
+    "act_seconds_before_close": 90,
+    "too_late_seconds": 30,
+    "min_confidence": 0.65,
+    "min_edge": 0.08,
+    "min_up_price": 0.10,
+    "max_up_price": 0.90,
+    "early_entry_min_confidence": 0.75,
+    "early_entry_min_edge": 0.18,
+    "early_entry_min_series_points": 4
+  }
+
+  ,{
+    "_note": "INATIVA — 67.0% acerto, 6 trades, edge -0.024. Pior das 4 no dry-run.",
+    "_inactive": true,
+    "name": "fast_60s",
+    "description": "Entrada mais tarde (60s) — preço mais settled",
+    "act_seconds_before_close": 60,
+    "too_late_seconds": 20,
+    "min_confidence": 0.70,
+    "min_edge": 0.10,
+    "min_up_price": 0.15,
+    "max_up_price": 0.85,
+    "early_entry_min_confidence": 0.82,
+    "early_entry_min_edge": 0.25,
+    "early_entry_min_series_points": 5
+  }
+]
