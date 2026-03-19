@@ -44,6 +44,7 @@ module MarketScanner
       @market_analysis    = nil   # cached Claude analysis for this window
       @observe_series     = []    # time-series data collected during OBSERVE phase
       @traded_this_market = false
+      @act_reanalyzed     = false # re-analyze once when entering ACT phase
       @balance_usdc       = nil
       @balance_fetched_at = nil
 
@@ -86,30 +87,58 @@ module MarketScanner
         return
       end
 
-      if phase_sym == :observe
+      # Filtro de orderbook ruim — thin markets produzem análises ruins
+      max_spread   = params.fetch("max_spread", 0.10)
+      min_liq      = params.fetch("min_liquidity", 50.0)
+      spread_ok    = up[:spread].nil? || up[:spread] <= max_spread
+      liquidity_ok = up[:liquidity].to_f >= min_liq
+      orderbook_ok = spread_ok && liquidity_ok
+
+      unless orderbook_ok
+        warn "\e[33m[Scanner] Thin orderbook: spread=#{up[:spread]} liq=$#{up[:liquidity]&.round(0)} — skipping\e[0m"
+      end
+
+      if phase_sym == :observe && orderbook_ok
         @observe_series << {
           time:      Time.now.utc.strftime("%H:%M:%S"),
           up_price:  up[:buy_price],
           btc_price: btc[:price],
-          delta_5m:  btc[:delta_5m]
+          delta_5m:  btc[:delta_5m],
+          delta_1m:  btc[:delta_1m],
+          volume_5m: btc[:volume_5m],
+          spread:    up[:spread],
+          liquidity: up[:liquidity]
         }
       end
 
       early_min_points = params.fetch("early_entry_min_series_points", 5)
-      should_analyze   = @market_analysis.nil? && (
-        phase_sym == :act ||
-        (phase_sym == :observe && @observe_series.size >= early_min_points)
+
+      # Analyze when: first time with enough data OR re-analyze once on ACT entry
+      should_analyze = orderbook_ok && (
+        (@market_analysis.nil? && (
+          phase_sym == :act ||
+          (phase_sym == :observe && @observe_series.size >= early_min_points)
+        )) ||
+        (phase_sym == :act && !@act_reanalyzed && !@market_analysis.nil?)
       )
 
       if should_analyze
-        series = @observe_series.empty? ? [{
+        current_point = {
           time: Time.now.utc.strftime("%H:%M:%S"), up_price: up[:buy_price],
-          btc_price: btc[:price], delta_5m: btc[:delta_5m]
-        }] : @observe_series
+          btc_price: btc[:price], delta_5m: btc[:delta_5m],
+          delta_1m: btc[:delta_1m], volume_5m: btc[:volume_5m],
+          spread: up[:spread], liquidity: up[:liquidity]
+        }
+        series = @observe_series.empty? ? [current_point] : (@observe_series + [current_point])
+        prev_windows       = Database.recent_windows(limit: 3, dry_run: dry_run)
+        recent_performance = Database.live_win_rate(limit: 20)
         @market_analysis = @analyst.analyze_series(
-          market_question: market[:question],
-          series:          series
+          market_question:    market[:question],
+          series:             series,
+          prev_windows:       prev_windows,
+          recent_performance: recent_performance
         )
+        @act_reanalyzed = true if phase_sym == :act
       end
 
       analysis = @market_analysis
@@ -136,39 +165,27 @@ module MarketScanner
         end
       end
 
-      warn "[Scanner] Skipping: UP price #{up_price} out of range [#{min_up}, #{max_up}]" if !price_ok && analysis && !@traded_this_market
+      warn "\e[33m[Scanner] Skipping: UP price #{up_price} out of range [#{min_up}, #{max_up}]\e[0m" if !price_ok && analysis && !@traded_this_market
 
       record_scan(market, up, btc, analysis, act, strategy["name"], dry_run) if analysis
       balance = dry_run ? simulated_balance : fetch_balance_cached
 
       if act
         order = dry_run ? nil : execute_order(up, down, analysis, params)
+        if !dry_run
+          if order&.dig(:orderID)
+            puts "\e[32m[#{Time.now.utc.strftime("%H:%M:%S")}] ORDER SENT  id:#{order[:orderID]} status:#{order[:status]}\e[0m"
+          else
+            warn "\e[31m[#{Time.now.utc.strftime("%H:%M:%S")}] ORDER FAILED — no orderID returned (check [OrderExecutor] logs above)\e[0m"
+          end
+        end
         record_trade(market, up, analysis, order, params, strategy["name"], dry_run)
         @traded_this_market = true
       end
 
-      Dashboard.log_scan(
-        market:         market,
-        btc:            btc,
-        up:             up,
-        analysis:       analysis,
-        phase:          phase,
-        time_left:      time_left,
-        start_time:     start_time,
-        acted:          act,
-        dry_run:        dry_run,
-        min_confidence: params.fetch("min_confidence", 0.70),
-        min_edge:       params.fetch("min_edge", 0.10),
-        strategy:       strategy["name"]
-      )
-      Dashboard.print(
-        next_scan_in:   base_params["scan_interval_seconds"],
-        balance_usdc:   balance,
-        market_url:     market[:url],
-        dry_run:        dry_run,
-        min_confidence: params.fetch("min_confidence", 0.70),
-        min_edge:       params.fetch("min_edge", 0.10)
-      )
+      rec   = analysis ? "#{analysis[:recommendation]} conf:#{analysis[:confidence].round(2)} edge:#{analysis[:edge].round(3)}" : "analyzing..."
+      acted = act ? " >>> ACT #{dry_run ? "(dry)" : "(LIVE)"}" : ""
+      puts "[#{Time.now.utc.strftime("%H:%M:%S")}] #{phase.to_s.upcase.ljust(7)} UP:#{up[:buy_price]&.round(2) || "n/a"} BTC:$#{btc[:price]} Δ5m:#{btc[:delta_5m]}% Δ1m:#{btc[:delta_1m]}%  #{rec}  #{time_left}s left#{acted}"
     end
 
     private
@@ -189,7 +206,8 @@ module MarketScanner
         @market_analysis    = nil
         @observe_series     = []
         @traded_this_market = false
-        $stderr.puts "\n[Scanner] ▶ New window: #{market[:question]}  [strategy: #{@current_strategy["name"]}]"
+        @act_reanalyzed     = false
+        puts "\n[#{Time.now.utc.strftime("%H:%M:%S")}] === NEW WINDOW: #{market[:question]} [#{@current_strategy["name"]}] ==="
       end
 
       @current_market
@@ -238,38 +256,49 @@ module MarketScanner
       resp  = @clob.post("/books", body)
       books = JSON.parse(resp.body, symbolize_names: true)
 
-      books.map.with_index do |book, idx|
+      # Match by asset_id — CLOB does not guarantee response order matches request order
+      token_ids.map.with_index do |token_id, idx|
+        book = books.find { |b| b[:asset_id] == token_id }
+        next nil unless book
+
         best_bid  = best_price(book[:bids])
         best_ask  = best_price(book[:asks], :asc)
         liquidity = total_liquidity(book[:bids]) + total_liquidity(book[:asks])
 
         {
-          outcome:    outcomes[idx] || (idx == 0 ? "UP" : "DOWN"),
-          token_id:   book[:asset_id],
+          outcome:    outcomes[idx],
+          token_id:   token_id,
           buy_price:  best_ask,
           sell_price: best_bid,
           spread:     best_ask && best_bid ? (best_ask - best_bid).round(4) : nil,
           liquidity:  liquidity.round(2)
         }
-      end
+      end.compact
     end
 
     # -----------------------------------------------------------------------
     # BTC spot price + 5-min momentum from Binance
     # -----------------------------------------------------------------------
     def fetch_btc_spot
-      conn   = Faraday.new(url: BINANCE_URL)
-      resp   = conn.get("/api/v3/klines", symbol: "BTCUSDT", interval: "5m", limit: 2)
-      klines = JSON.parse(resp.body)
+      conn      = Faraday.new(url: BINANCE_URL)
+      resp_5m   = conn.get("/api/v3/klines", symbol: "BTCUSDT", interval: "5m", limit: 3)
+      resp_1m   = conn.get("/api/v3/klines", symbol: "BTCUSDT", interval: "1m", limit: 3)
+      klines_5m = JSON.parse(resp_5m.body)
+      klines_1m = JSON.parse(resp_1m.body)
 
-      prev_close = klines[0][4].to_f
-      curr_close = klines[1][4].to_f
-      delta      = ((curr_close - prev_close) / prev_close * 100).round(4)
+      curr_5m    = klines_5m[-1][4].to_f
+      prev_5m    = klines_5m[-2][4].to_f
+      delta_5m   = ((curr_5m - prev_5m) / prev_5m * 100).round(4)
+      volume_5m  = klines_5m[-1][5].to_f.round(2)
 
-      { price: curr_close.round(2), delta_5m: delta }
+      curr_1m  = klines_1m[-1][4].to_f
+      prev_1m  = klines_1m[-2][4].to_f
+      delta_1m = ((curr_1m - prev_1m) / prev_1m * 100).round(4)
+
+      { price: curr_5m.round(2), delta_5m:, delta_1m:, volume_5m: }
     rescue => e
       warn "[Scanner] BTC fetch failed: #{e.message}"
-      { price: nil, delta_5m: nil }
+      { price: nil, delta_5m: nil, delta_1m: nil, volume_5m: nil }
     end
 
     # -----------------------------------------------------------------------
@@ -425,8 +454,8 @@ if __FILE__ == $PROGRAM_NAME
     begin
       scanner.scan(dry_run: dry_run)
     rescue => e
-      warn "[Scanner] Error: #{e.message}"
-      warn e.backtrace.first(3).join("\n")
+      warn "\e[31m[Scanner] Error: #{e.message}\e[0m"
+      warn "\e[31m#{e.backtrace.first(3).join("\n")}\e[0m"
     end
     # Sleep until next exact interval boundary (e.g. :00, :10, :20, :30...)
     now       = Time.now.to_f

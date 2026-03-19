@@ -175,6 +175,46 @@ module Database
     { total:, wins:, rate: wins.to_f / total }
   end
 
+  # Last N resolved market windows with Claude accuracy per window
+  def self.recent_windows(limit: 3, dry_run: false)
+    dry_filter = dry_run ? "AND dry_run = 1" : "AND (dry_run = 0 OR dry_run IS NULL)"
+    connection.execute(<<~SQL)
+      SELECT
+        condition_id,
+        market_question                                              AS question,
+        MAX(timestamp)                                               AS last_ts,
+        COUNT(*)                                                     AS total,
+        SUM(CASE WHEN outcome = 'correct' THEN 1 ELSE 0 END)        AS correct,
+        CAST(SUM(CASE WHEN outcome = 'correct' THEN 1 ELSE 0 END) AS REAL) / COUNT(*) AS accuracy
+      FROM scans
+      WHERE resolved = 1 #{dry_filter}
+      GROUP BY condition_id
+      ORDER BY last_ts DESC
+      LIMIT #{limit}
+    SQL
+  end
+
+  # Live trade performance (excludes dry-run)
+  def self.live_win_rate(limit: 20)
+    row = connection.get_first_row(<<~SQL)
+      SELECT
+        COUNT(*)                                   AS total,
+        SUM(CASE WHEN result = 'win'  THEN 1 END)  AS wins,
+        SUM(CASE WHEN result = 'loss' THEN 1 END)  AS losses
+      FROM (
+        SELECT result FROM trades
+        WHERE result IS NOT NULL AND (dry_run = 0 OR dry_run IS NULL)
+        ORDER BY timestamp DESC LIMIT #{limit}
+      )
+    SQL
+    total = row["total"].to_i
+    return nil if total.zero?
+
+    wins   = row["wins"].to_i
+    losses = row["losses"].to_i
+    { total:, wins:, losses:, rate: wins.to_f / total }
+  end
+
   # ---------------------------------------------------------------------------
   # Backup — dumps the full DB as plain SQL text (commit this, not the .db)
   # ---------------------------------------------------------------------------
