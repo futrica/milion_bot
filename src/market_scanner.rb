@@ -2,7 +2,6 @@ require "faraday"
 require "json"
 require "dotenv/load"
 require_relative "analyst"
-require_relative "slack_notifier"
 require_relative "order_executor"
 require_relative "database"
 require_relative "market_finder"
@@ -488,12 +487,11 @@ if __FILE__ == $PROGRAM_NAME
   label = dry_run ? "DRY-RUN (simulated $100 bankroll, $1/trade)" : "LIVE"
   puts "[Scanner] #{label} — BTC Up/Down 5m — aligned to #{interval}s grid (Ctrl+C to stop)"
 
-  # Background thread: send Slack summary every SUMMARY_LOOKBACK_SECONDS
+  # Background thread: resolve open trades every 3 hours
   Thread.new do
-    summary_interval = SlackNotifier::SUMMARY_LOOKBACK_SECONDS
     loop do
-      sleep summary_interval
-      SlackNotifier.send_summary(dry_run: dry_run)
+      sleep 3 * 3600
+      Resolver.run
     end
   end
 
