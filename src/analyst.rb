@@ -149,7 +149,7 @@ module Analyst
       resp = @http.post(
         "/v1/messages",
         {
-          model:      "claude-sonnet-4-6",
+          model:      "claude-haiku-4-5-20251001",
           max_tokens: 512,
           system:     system_prompt,
           messages:   [{ role: "user", content: "Analyze the series and give your recommendation." }]

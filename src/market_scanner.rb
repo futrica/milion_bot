@@ -113,13 +113,10 @@ module MarketScanner
 
       early_min_points = params.fetch("early_entry_min_series_points", 5)
 
-      # Analyze when: first time with enough data OR re-analyze once on ACT entry
-      should_analyze = orderbook_ok && (
-        (@market_analysis.nil? && (
-          phase_sym == :act ||
-          (phase_sym == :observe && @observe_series.size >= early_min_points)
-        )) ||
-        (phase_sym == :act && !@act_reanalyzed && !@market_analysis.nil?)
+      # Analyze once when enough data is available (OBSERVE) or on first ACT scan
+      should_analyze = orderbook_ok && @market_analysis.nil? && (
+        phase_sym == :act ||
+        (phase_sym == :observe && @observe_series.size >= early_min_points)
       )
 
       if should_analyze
@@ -138,7 +135,6 @@ module MarketScanner
           prev_windows:       prev_windows,
           recent_performance: recent_performance
         )
-        @act_reanalyzed = true if phase_sym == :act
       end
 
       analysis = @market_analysis
@@ -148,9 +144,27 @@ module MarketScanner
       max_up   = params.fetch("max_up_price", 0.85)
       up_price = up[:buy_price].to_f
       price_ok = up_price >= min_up && up_price <= max_up
+      # PRICE RANGE: 0.15–0.85 (restored after relaxing to 0.05–0.95 hurt PnL on 2026-03-20)
+      # At extreme prices (UP ≤ 10% or ≥ 90%) win payouts are ~$0.05 while losses cost $1.
+      # Need >93% win rate to break even — market already prices these at 93%, so no real edge.
+
+      us_open_pause = us_market_open_pause?(params)
+      # US MARKET OPEN PAUSE: configurable via trade_params.json (pause_us_market_open).
+      # On 2026-03-20: 18W/4L (82% win rate) before 10AM ET → 2W/6L (25%) after US open.
+      # BTC volatility spikes during US equity open, reducing Claude's prediction accuracy.
+      # Adjust window via pause_us_market_open_start_et / pause_us_market_open_end_et.
+
+      # MIN ENTRY PRICE: blocks contrarian bets where we'd pay too little per token.
+      # entry_price = cost of the token we're buying (UP price if BUY_YES, DOWN price if BUY_NO).
+      # E.g. min_entry_price=0.25 blocks BUY_NO when UP>0.75 (DOWN costs <25¢ — big underdog).
+      # On 2026-03-21: BUY_NO at DOWN=0.17 (UP=0.83) lost badly; would have been blocked.
+      rec         = analysis ? analysis[:recommendation].to_s : ""
+      entry_price = rec == "BUY_YES" ? up_price : (1.0 - up_price)
+      min_entry   = params.fetch("min_entry_price", 0.0)
+      entry_ok    = min_entry.zero? || entry_price >= min_entry
 
       act = false
-      if !@traded_this_market && analysis && price_ok && time_left > too_late_secs
+      if !@traded_this_market && analysis && price_ok && entry_ok && !us_open_pause && time_left > too_late_secs
         confidence = analysis[:confidence].to_f
         edge       = analysis[:edge].to_f.abs
 
@@ -166,6 +180,8 @@ module MarketScanner
       end
 
       warn "\e[33m[Scanner] Skipping: UP price #{up_price} out of range [#{min_up}, #{max_up}]\e[0m" if !price_ok && analysis && !@traded_this_market
+      warn "\e[33m[Scanner] Skipping: US market open pause (#{Time.now.getlocal("-04:00").strftime("%H:%M")} ET)\e[0m" if us_open_pause && analysis && !@traded_this_market && price_ok
+      warn "\e[33m[Scanner] Skipping: entry price #{entry_price.round(2)} below min #{min_entry} (#{rec} contrarian)\e[0m" if !entry_ok && analysis && !@traded_this_market && price_ok && !us_open_pause
 
       record_scan(market, up, btc, analysis, act, strategy["name"], dry_run) if analysis
       balance = dry_run ? simulated_balance : fetch_balance_cached
@@ -175,15 +191,18 @@ module MarketScanner
         if !dry_run
           if order&.dig(:orderID)
             puts "\e[32m[#{Time.now.utc.strftime("%H:%M:%S")}] ORDER SENT  id:#{order[:orderID]} status:#{order[:status]}\e[0m"
+          elsif order&.dig(:_no_match)
+            warn "\e[33m[#{Time.now.utc.strftime("%H:%M:%S")}] SKIPPING — no counterparty available (FAK killed)\e[0m"
           else
-            warn "\e[31m[#{Time.now.utc.strftime("%H:%M:%S")}] ORDER FAILED — no orderID returned (check [OrderExecutor] logs above)\e[0m"
+            warn "\e[31m[#{Time.now.utc.strftime("%H:%M:%S")}] ORDER FAILED — unexpected error (check [OrderExecutor] logs above)\e[0m"
           end
         end
-        record_trade(market, up, analysis, order, params, strategy["name"], dry_run)
+        clean_order = order&.dig(:_error) ? nil : order
+        record_trade(market, up, analysis, clean_order, params, strategy["name"], dry_run)
         @traded_this_market = true
       end
 
-      rec   = analysis ? "#{analysis[:recommendation]} conf:#{analysis[:confidence].round(2)} edge:#{analysis[:edge].round(3)}" : "analyzing..."
+      rec   = analysis ? "#{analysis[:recommendation]} conf:#{analysis[:confidence]&.round(2)} edge:#{analysis[:edge]&.round(3)}" : "analyzing..."
       acted = act ? " >>> ACT #{dry_run ? "(dry)" : "(LIVE)"}" : ""
       puts "[#{Time.now.utc.strftime("%H:%M:%S")}] #{phase.to_s.upcase.ljust(7)} UP:#{up[:buy_price]&.round(2) || "n/a"} BTC:$#{btc[:price]} Δ5m:#{btc[:delta_5m]}% Δ1m:#{btc[:delta_1m]}%  #{rec}  #{time_left}s left#{acted}"
     end
@@ -310,6 +329,34 @@ module MarketScanner
     end
 
     # -----------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # US market open pause
+    # -----------------------------------------------------------------------
+    def us_market_open_pause?(params)
+      return false unless params.fetch("pause_us_market_open", false)
+
+      start_str = params.fetch("pause_us_market_open_start_et", "09:30")
+      end_str   = params.fetch("pause_us_market_open_end_et",   "11:00")
+
+      # Convert current UTC time to US Eastern (UTC-5 winter / UTC-4 DST)
+      # DST in US: second Sunday of March → first Sunday of November
+      now_utc    = Time.now.utc
+      dst_active = now_utc.month > 3 && now_utc.month < 11 ||
+                   (now_utc.month == 3  && now_utc.day >= 8)  ||
+                   (now_utc.month == 11 && now_utc.day < 7)
+      offset     = dst_active ? -4 : -5
+      now_et     = now_utc + offset * 3600
+
+      # Only pause on weekdays — US market is closed on weekends
+      return false if now_et.saturday? || now_et.sunday?
+
+      now_mins   = now_et.hour * 60 + now_et.min
+      start_mins = start_str.split(":").then { |h, m| h.to_i * 60 + m.to_i }
+      end_mins   = end_str.split(":").then   { |h, m| h.to_i * 60 + m.to_i }
+
+      now_mins >= start_mins && now_mins < end_mins
+    end
+
     # Wallet balance — cached for 60s to avoid unnecessary auth calls
     # -----------------------------------------------------------------------
     def fetch_balance_cached
@@ -376,7 +423,7 @@ module MarketScanner
                           taking = order[:takingAmount].to_f
                           taking > 0 ? (making / taking).round(6) : nil
                         end : nil,
-        shares:         order ? order[:takingAmount].to_f / 1_000_000 : nil,
+        shares:         order ? order[:takingAmount].to_f : nil,
         strategy:       strategy_name,
         dry_run:        dry_run ? 1 : 0
       )

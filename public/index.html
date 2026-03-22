@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>milion_bot</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body { background: #0f172a; color: #e2e8f0; font-family: 'JetBrains Mono', monospace; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; }
+    .win  { color: #22c55e; }
+    .loss { color: #ef4444; }
+    .hold { color: #eab308; }
+    .observe { color: #06b6d4; }
+    .act { color: #a855f7; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #1e293b; }
+    ::-webkit-scrollbar-thumb { background: #475569; border-radius: 2px; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect } = React;
+
+const fmt = (n) => n != null ? (n >= 0 ? `+$${n.toFixed(4)}` : `-$${Math.abs(n).toFixed(4)}`) : "—";
+const fmtBal = (n) => n != null ? `$${n.toFixed(2)}` : "—";
+
+function StatCard({ label, value, sub, color }) {
+  return (
+    <div className="card p-5 flex flex-col gap-1">
+      <div className="text-xs text-slate-400 uppercase tracking-widest">{label}</div>
+      <div className={`text-2xl font-bold ${color || "text-white"}`}>{value}</div>
+      {sub && <div className="text-xs text-slate-500">{sub}</div>}
+    </div>
+  );
+}
+
+function BalanceCard({ balance, initialBalance, onSave }) {
+  const [editing, setEditing] = useState(false);
+  const [input, setInput]     = useState("");
+
+  const startEdit = () => { setInput(initialBalance?.toFixed(2) ?? ""); setEditing(true); };
+  const cancel    = () => setEditing(false);
+  const save      = () => {
+    const val = parseFloat(input);
+    if (!isNaN(val) && val > 0) { onSave(val); setEditing(false); }
+  };
+
+  return (
+    <div className="card p-5 flex flex-col gap-1">
+      <div className="flex items-center justify-between">
+        <div className="text-xs text-slate-400 uppercase tracking-widest">Balance</div>
+        {!editing && (
+          <button onClick={startEdit} className="text-xs text-slate-500 hover:text-slate-300 transition">
+            ✎ edit
+          </button>
+        )}
+      </div>
+      <div className="text-2xl font-bold text-green-400">${balance?.toFixed(2) ?? "—"}</div>
+      {editing ? (
+        <div className="flex gap-2 mt-1">
+          <input
+            className="bg-slate-700 text-white text-sm rounded px-2 py-1 w-28 outline-none border border-slate-500"
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") save(); if (e.key === "Escape") cancel(); }}
+            autoFocus
+          />
+          <button onClick={save}   className="text-xs text-green-400 hover:text-green-300">✓</button>
+          <button onClick={cancel} className="text-xs text-slate-500 hover:text-slate-300">✗</button>
+        </div>
+      ) : (
+        <div className="text-xs text-slate-500">initial: ${initialBalance?.toFixed(2) ?? "—"}</div>
+      )}
+    </div>
+  );
+}
+
+function Badge({ result }) {
+  if (result === "win")  return <span className="win font-bold">✓ win</span>;
+  if (result === "loss") return <span className="loss font-bold">✗ loss</span>;
+  return <span className="text-slate-400">⏳ pending</span>;
+}
+
+function OrderBadge({ orderId, orderStatus }) {
+  if (!orderId)                      return <span className="loss text-xs">✗ failed</span>;
+  if (orderStatus === "matched")     return <span className="win text-xs">✓ executed</span>;
+  return <span className="hold text-xs">⏳ open</span>;
+}
+
+function App() {
+  const [data, setData] = useState(null);
+  const [lastUpdate, setLastUpdate] = useState(null);
+
+  const fetchData = () => {
+    fetch("/api/stats")
+      .then(r => r.json())
+      .then(d => { setData(d); setLastUpdate(new Date()); })
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    fetchData();
+    const id = setInterval(fetchData, 10000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!data) return (
+    <div className="flex items-center justify-center h-screen text-slate-400">
+      Connecting to milion_bot...
+    </div>
+  );
+
+  const { win_rate, scan_acc, pnl, balance, initial_balance, trades } = data;
+  const winRate = win_rate ? `${(win_rate.rate * 100).toFixed(1)}%` : "—";
+  const winSub  = win_rate ? `${win_rate.wins}W ${win_rate.total - win_rate.wins}L of ${win_rate.total} trades` : "No closed trades";
+  const accStr  = scan_acc ? `${(scan_acc.accuracy * 100).toFixed(1)}% (${scan_acc.correct}/${scan_acc.total})` : "—";
+  const pnlColor = pnl >= 0 ? "win" : "loss";
+
+  const saveBalance = (val) => {
+    fetch("/api/config/balance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initial_balance: val })
+    }).then(() => fetchData()).catch(() => {});
+  };
+
+  return (
+    <div className="min-h-screen p-6 max-w-7xl mx-auto">
+
+      {/* Header */}
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-2xl font-bold text-white">milion_bot</h1>
+          <p className="text-slate-400 text-sm">BTC Up/Down 5m — Polymarket</p>
+        </div>
+        <div className="text-xs text-slate-500">
+          {lastUpdate ? `updated ${lastUpdate.toLocaleTimeString()}` : "—"}
+          <span className="ml-2 inline-block w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+        </div>
+      </div>
+
+      {/* Stat Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <BalanceCard balance={balance} initialBalance={initial_balance} onSave={saveBalance} />
+        <StatCard label="PnL" value={fmt(pnl)} color={pnlColor} sub="all resolved trades" />
+        <StatCard label="Win Rate" value={winRate} color={win_rate && win_rate.rate >= 0.55 ? "win" : "loss"} sub={winSub} />
+        <StatCard label="Scan Acc" value={accStr} sub="Claude vs resolved" />
+      </div>
+
+      {/* Recent Trades — full width */}
+      <div className="card p-5">
+        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-widest mb-4">
+          Recent Trades
+        </h2>
+        {trades.length === 0 ? (
+          <p className="text-slate-500 text-sm">No trades yet.</p>
+        ) : (
+          <div className="overflow-auto max-h-96">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-slate-500 border-b border-slate-700">
+                  <th className="text-left pb-2">Time (UTC)</th>
+                  <th className="text-left pb-2">Dir</th>
+                  <th className="text-right pb-2">UP Price</th>
+                  <th className="text-right pb-2">Order</th>
+                  <th className="text-right pb-2">Result</th>
+                  <th className="text-right pb-2">PnL</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trades.map((t, i) => (
+                  <tr key={i} className="border-b border-slate-800 hover:bg-slate-800/40">
+                    <td className="py-2 text-slate-400">
+                      {t.timestamp ? new Date(t.timestamp).toLocaleTimeString("pt-BR", {hour:"2-digit", minute:"2-digit"}) : "—"}
+                    </td>
+                    <td className={`py-2 font-bold ${t.recommendation === "BUY_YES" ? "win" : t.recommendation === "BUY_NO" ? "loss" : "hold"}`}>
+                      {t.recommendation}
+                    </td>
+                    <td className="py-2 text-right text-slate-300">{t.yes_price ?? "—"}</td>
+                    <td className="py-2 text-right"><OrderBadge orderId={t.order_id} orderStatus={t.order_status} /></td>
+                    <td className="py-2 text-right"><Badge result={t.result} /></td>
+                    <td className={`py-2 text-right font-mono ${t.pnl_usdc >= 0 ? "win" : "loss"}`}>
+                      {t.pnl_usdc != null ? fmt(t.pnl_usdc) : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

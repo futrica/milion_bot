@@ -7,10 +7,14 @@
   "act_seconds_before_close": 90,
   "min_up_price": 0.15,
   "max_up_price": 0.85,
+  "min_entry_price": 0.30,
   "early_entry_min_confidence": 0.82,
   "early_entry_min_edge": 0.25,
   "early_entry_min_series_points": 5,
   "initial_balance": 18.19,
   "updated_at": "2026-03-18T19:54:54Z",
-  "updated_by": null
+  "updated_by": null,
+  "pause_us_market_open": true,
+  "pause_us_market_open_start_et": "09:30",
+  "pause_us_market_open_end_et": "11:00"
 }

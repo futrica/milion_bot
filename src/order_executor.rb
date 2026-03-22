@@ -75,9 +75,13 @@ module OrderExecutor
            "#{result[:orderID]} (#{result[:status]})"
       result
     rescue Faraday::Error => e
+      body = e.response&.dig(:body).to_s
       warn "[OrderExecutor] Submission failed: #{e.message}"
-      warn "[OrderExecutor] Response body: #{e.response&.dig(:body)}"
-      nil
+      warn "[OrderExecutor] Response body: #{body}"
+      no_match = body.include?("no orders found to match") ||
+                 body.include?("order too old") ||
+                 body.include?("service not ready")
+      { _error: true, _no_match: no_match }
     end
 
     # Exposed for balance fetching in scanner
