@@ -9,8 +9,10 @@ OBSERVED DATA (one row per 10s scan):
 Columns:
 - up_price   : market implied probability of UP outcome
 - btc_price  : BTC spot price (Binance)
-- delta_5m   : % change vs previous 5-min candle close
 - delta_1m   : % change vs previous 1-min candle close (short-term momentum)
+- delta_5m   : % change vs previous 5-min candle close
+- delta_15m  : % change vs previous 15-min candle close (medium-term trend)
+- delta_1h   : % change vs previous 1-hour candle close (macro trend)
 - volume_5m  : BTC volume traded in current 5-min candle (high = conviction)
 - spread     : bid-ask spread on UP token (wide = thin book, unreliable prices)
 - liquidity  : total $ liquidity in UP orderbook
@@ -18,28 +20,34 @@ Columns:
 TECHNICAL INDICATORS (pre-computed):
 {indicators}
 
-RECENT MARKET WINDOWS (last 3 resolved windows):
+RECENT MARKET WINDOWS (last 3 resolved windows, most recent first):
 {prev_windows}
 
-BOT LIVE PERFORMANCE:
-{recent_performance}
+RECENT LIVE TRADES (last 5 resolved, most recent first):
+{recent_trades}
 
 TASK:
 1. Analyze trend, momentum, acceleration, and mean-reversion signals in the series
 2. Use indicators to confirm or contradict the visual trend
 3. Check if delta_1m aligns with delta_5m — alignment = stronger signal
-4. High volume_5m relative to avg = conviction move, low volume = suspect move
-5. Consider previous windows for sustained trend context
-6. Estimate probability BTC closes UP (0.0–1.0)
-7. edge = your_probability - latest_up_price
-8. If |edge| > 10% AND confidence >= 0.7 → BUY_YES (up) or BUY_NO (down), else HOLD
+4. Use delta_15m and delta_1h to establish macro context: a 5m up-tick inside a bearish 1h trend is likely noise, not a signal
+5. High volume_5m relative to avg = conviction move, low volume = suspect move
+6. Review recent windows to identify sustained directional trend across windows
+7. Review recent live trades — if multiple recent losses share the same direction (e.g. repeated BUY_YES losses), reduce confidence for that direction; the market may be trending against it
+8. Estimate probability BTC closes UP (0.0–1.0)
+9. edge = your_probability - latest_up_price
+10. If |edge| > 10% AND confidence >= 0.7 → BUY_YES (up) or BUY_NO (down), else HOLD
 
 Key signals:
 - RSI(7) > 70 on UP price = overbought → likely reversal, lower UP probability
 - RSI(7) < 30 on UP price = oversold → likely bounce, raise UP probability
+- RSI(7) > 70 on BTC price = BTC overbought in 5m window → momentum may stall
+- RSI(7) < 30 on BTC price = BTC oversold in 5m window → potential bounce
 - BTC slope positive + delta_1m positive + volume above avg = strong UP confirmation
 - BTC slope negative + delta_1m negative + volume above avg = strong DOWN confirmation
 - delta_1m opposite to delta_5m = short-term reversal in progress → lower confidence
+- delta_15m and delta_1h negative while delta_1m positive = likely dead-cat bounce → prefer DOWN
+- delta_15m and delta_1h positive while delta_1m negative = likely pullback in uptrend → prefer UP
 - Spread > 0.05 = thin orderbook, prices unreliable → lower confidence
 - UP price drifting toward 0 or 1 near close = market conviction, follow it
 - Sharp reversal after consistent trend = mean reversion risk → lower confidence
@@ -50,5 +58,5 @@ RESPOND IN JSON ONLY:
   "edge":           float,
   "recommendation": "BUY_YES"|"BUY_NO"|"HOLD",
   "confidence":     float,
-  "reasoning":      string (2-3 sentences citing specific indicators, volume, and delta alignment)
+  "reasoning":      string (2-3 sentences citing specific indicators, macro trend alignment, and recent trade pattern if relevant)
 }

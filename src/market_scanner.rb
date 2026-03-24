@@ -99,14 +99,16 @@ module MarketScanner
 
       if phase_sym == :observe && orderbook_ok
         @observe_series << {
-          time:      Time.now.utc.strftime("%H:%M:%S"),
-          up_price:  up[:buy_price],
-          btc_price: btc[:price],
-          delta_5m:  btc[:delta_5m],
-          delta_1m:  btc[:delta_1m],
-          volume_5m: btc[:volume_5m],
-          spread:    up[:spread],
-          liquidity: up[:liquidity]
+          time:       Time.now.utc.strftime("%H:%M:%S"),
+          up_price:   up[:buy_price],
+          btc_price:  btc[:price],
+          delta_1m:   btc[:delta_1m],
+          delta_5m:   btc[:delta_5m],
+          delta_15m:  btc[:delta_15m],
+          delta_1h:   btc[:delta_1h],
+          volume_5m:  btc[:volume_5m],
+          spread:     up[:spread],
+          liquidity:  up[:liquidity]
         }
       end
 
@@ -121,18 +123,21 @@ module MarketScanner
       if should_analyze
         current_point = {
           time: Time.now.utc.strftime("%H:%M:%S"), up_price: up[:buy_price],
-          btc_price: btc[:price], delta_5m: btc[:delta_5m],
-          delta_1m: btc[:delta_1m], volume_5m: btc[:volume_5m],
-          spread: up[:spread], liquidity: up[:liquidity]
+          btc_price: btc[:price], delta_1m: btc[:delta_1m], delta_5m: btc[:delta_5m],
+          delta_15m: btc[:delta_15m], delta_1h: btc[:delta_1h],
+          volume_5m: btc[:volume_5m], spread: up[:spread], liquidity: up[:liquidity]
         }
-        series = @observe_series.empty? ? [current_point] : (@observe_series + [current_point])
+        series             = @observe_series.empty? ? [current_point] : (@observe_series + [current_point])
         prev_windows       = Database.recent_windows(limit: 3, dry_run: dry_run)
         recent_performance = Database.live_win_rate(limit: 20)
-        @market_analysis = @analyst.analyze_series(
+        recent_trades      = Database.live_recent_trades(limit: 5)
+        @market_analysis   = @analyst.analyze_series(
           market_question:    market[:question],
           series:             series,
           prev_windows:       prev_windows,
-          recent_performance: recent_performance
+          recent_performance: recent_performance,
+          recent_trades:      recent_trades,
+          phase:              phase_sym
         )
       end
 
@@ -299,24 +304,36 @@ module MarketScanner
     # -----------------------------------------------------------------------
     def fetch_btc_spot
       conn      = Faraday.new(url: BINANCE_URL)
-      resp_5m   = conn.get("/api/v3/klines", symbol: "BTCUSDT", interval: "5m", limit: 3)
-      resp_1m   = conn.get("/api/v3/klines", symbol: "BTCUSDT", interval: "1m", limit: 3)
-      klines_5m = JSON.parse(resp_5m.body)
-      klines_1m = JSON.parse(resp_1m.body)
+      resp_5m   = conn.get("/api/v3/klines", symbol: "BTCUSDT", interval: "5m",  limit: 3)
+      resp_1m   = conn.get("/api/v3/klines", symbol: "BTCUSDT", interval: "1m",  limit: 3)
+      resp_15m  = conn.get("/api/v3/klines", symbol: "BTCUSDT", interval: "15m", limit: 3)
+      resp_1h   = conn.get("/api/v3/klines", symbol: "BTCUSDT", interval: "1h",  limit: 3)
+      klines_5m  = JSON.parse(resp_5m.body)
+      klines_1m  = JSON.parse(resp_1m.body)
+      klines_15m = JSON.parse(resp_15m.body)
+      klines_1h  = JSON.parse(resp_1h.body)
 
-      curr_5m    = klines_5m[-1][4].to_f
-      prev_5m    = klines_5m[-2][4].to_f
-      delta_5m   = ((curr_5m - prev_5m) / prev_5m * 100).round(4)
-      volume_5m  = klines_5m[-1][5].to_f.round(2)
+      curr_5m   = klines_5m[-1][4].to_f
+      prev_5m   = klines_5m[-2][4].to_f
+      delta_5m  = ((curr_5m - prev_5m) / prev_5m * 100).round(4)
+      volume_5m = klines_5m[-1][5].to_f.round(2)
 
       curr_1m  = klines_1m[-1][4].to_f
       prev_1m  = klines_1m[-2][4].to_f
       delta_1m = ((curr_1m - prev_1m) / prev_1m * 100).round(4)
 
-      { price: curr_5m.round(2), delta_5m:, delta_1m:, volume_5m: }
+      curr_15m  = klines_15m[-1][4].to_f
+      prev_15m  = klines_15m[-2][4].to_f
+      delta_15m = ((curr_15m - prev_15m) / prev_15m * 100).round(4)
+
+      curr_1h  = klines_1h[-1][4].to_f
+      prev_1h  = klines_1h[-2][4].to_f
+      delta_1h = ((curr_1h - prev_1h) / prev_1h * 100).round(4)
+
+      { price: curr_5m.round(2), delta_5m:, delta_1m:, delta_15m:, delta_1h:, volume_5m: }
     rescue => e
       warn "[Scanner] BTC fetch failed: #{e.message}"
-      { price: nil, delta_5m: nil, delta_1m: nil, volume_5m: nil }
+      { price: nil, delta_5m: nil, delta_1m: nil, delta_15m: nil, delta_1h: nil, volume_5m: nil }
     end
 
     # -----------------------------------------------------------------------

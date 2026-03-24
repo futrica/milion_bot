@@ -177,21 +177,40 @@ module Database
 
   # Last N resolved market windows with Claude accuracy per window
   def self.recent_windows(limit: 3, dry_run: false)
-    dry_filter = dry_run ? "AND dry_run = 1" : "AND (dry_run = 0 OR dry_run IS NULL)"
+    scan_filter  = dry_run ? "AND s.dry_run = 1" : "AND (s.dry_run = 0 OR s.dry_run IS NULL)"
+    trade_filter = "(t.dry_run = 0 OR t.dry_run IS NULL)"
     connection.execute(<<~SQL)
       SELECT
-        condition_id,
-        market_question                                              AS question,
-        MAX(timestamp)                                               AS last_ts,
-        COUNT(*)                                                     AS total,
-        SUM(CASE WHEN outcome = 'correct' THEN 1 ELSE 0 END)        AS correct,
-        CAST(SUM(CASE WHEN outcome = 'correct' THEN 1 ELSE 0 END) AS REAL) / COUNT(*) AS accuracy
-      FROM scans
-      WHERE resolved = 1 #{dry_filter}
-      GROUP BY condition_id
+        s.condition_id,
+        s.market_question                                                    AS question,
+        MAX(s.timestamp)                                                     AS last_ts,
+        COUNT(*)                                                             AS total,
+        SUM(CASE WHEN s.outcome = 'correct' THEN 1 ELSE 0 END)              AS correct,
+        CAST(SUM(CASE WHEN s.outcome = 'correct' THEN 1 ELSE 0 END) AS REAL)
+          / COUNT(*)                                                         AS accuracy,
+        t.recommendation                                                     AS trade_rec,
+        t.result                                                             AS trade_result
+      FROM scans s
+      LEFT JOIN trades t ON t.condition_id = s.condition_id AND #{trade_filter}
+      WHERE s.resolved = 1 #{scan_filter}
+      GROUP BY s.condition_id
       ORDER BY last_ts DESC
       LIMIT #{limit}
     SQL
+  end
+
+  # Last N resolved live trades with direction details (for Claude context)
+  def self.live_recent_trades(limit: 5)
+    connection.execute(<<~SQL).map { |r|
+      SELECT recommendation, fill_price, result, pnl_usdc
+      FROM trades
+      WHERE result IS NOT NULL AND (dry_run = 0 OR dry_run IS NULL)
+      ORDER BY timestamp DESC
+      LIMIT #{limit}
+    SQL
+      { recommendation: r["recommendation"], fill_price: r["fill_price"],
+        result: r["result"], pnl_usdc: r["pnl_usdc"] }
+    }
   end
 
   # Live trade performance (excludes dry-run)
