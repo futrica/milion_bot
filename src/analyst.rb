@@ -29,7 +29,13 @@ module Analyst
                        recent_trades: [], phase: :act)
       table      = build_table(series)
       indicators = compute_indicators(series)
-      model      = phase == :observe ? SONNET : HAIKU
+      # TODO: Sonnet for OBSERVE was too conservative in practice (confidence 0.55–0.65 vs
+      # Haiku's 0.72–0.82), causing zero trades. Likely caused by Sonnet being better
+      # calibrated + recent-loss context making it overly cautious. To re-enable:
+      #   1. Lower min_confidence to ~0.62 and min_edge to ~0.08 in trade_params.json, OR
+      #   2. Remove recent losses from context (format_recent_trades) to reduce caution, OR
+      #   3. Just swap the line below back to: model = phase == :observe ? SONNET : HAIKU
+      model      = HAIKU
 
       prompt = @template
         .gsub("{market_question}",    market_question.to_s)
