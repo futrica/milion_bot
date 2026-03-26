@@ -167,8 +167,16 @@ module MarketScanner
       min_entry   = params.fetch("min_entry_price", 0.0)
       entry_ok    = min_entry.zero? || entry_price >= min_entry
 
+      # UNCERTAIN ZONE FILTER: skip entries where entry_price is in the 0.40–0.55 range.
+      # Data (253 trades): fill 0.40–0.55 → -15.7% edge vs market implied, -$0.39/trade avg.
+      # fill < 0.40 → +7.9% edge (contrarian underdogs). fill > 0.55 → near break-even.
+      # Configurable via skip_uncertain_min / skip_uncertain_max in trade_params.json.
+      uncertain_min = params.fetch("skip_uncertain_min", 0.0).to_f
+      uncertain_max = params.fetch("skip_uncertain_max", 0.0).to_f
+      uncertain_ok  = uncertain_min.zero? || !(entry_price >= uncertain_min && entry_price <= uncertain_max)
+
       act = false
-      if !@traded_this_market && analysis && price_ok && entry_ok && !us_open_pause && time_left > too_late_secs
+      if !@traded_this_market && analysis && price_ok && entry_ok && uncertain_ok && !us_open_pause && time_left > too_late_secs
         confidence = analysis[:confidence].to_f
         edge       = analysis[:edge].to_f.abs
 
@@ -186,6 +194,7 @@ module MarketScanner
       warn "\e[33m[Scanner] Skipping: UP price #{up_price} out of range [#{min_up}, #{max_up}]\e[0m" if !price_ok && analysis && !@traded_this_market
       warn "\e[33m[Scanner] Skipping: US market open pause (#{Time.now.getlocal("-04:00").strftime("%H:%M")} ET)\e[0m" if us_open_pause && analysis && !@traded_this_market && price_ok
       warn "\e[33m[Scanner] Skipping: entry price #{entry_price.round(2)} below min #{min_entry} (#{rec} contrarian)\e[0m" if !entry_ok && analysis && !@traded_this_market && price_ok && !us_open_pause
+      warn "\e[33m[Scanner] Skipping: entry price #{entry_price.round(2)} in uncertain zone [#{uncertain_min}–#{uncertain_max}] — no edge\e[0m" if !uncertain_ok && analysis && !@traded_this_market && price_ok && entry_ok && !us_open_pause
 
       record_scan(market, up, btc, analysis, act, strategy["name"], dry_run) if analysis
       balance = dry_run ? simulated_balance : fetch_balance_cached
