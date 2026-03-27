@@ -152,11 +152,16 @@ module MarketScanner
       # At extreme prices (UP ≤ 10% or ≥ 90%) win payouts are ~$0.05 while losses cost $1.
       # Need >93% win rate to break even — market already prices these at 93%, so no real edge.
 
-      us_open_pause = us_market_open_pause?(params)
+      us_open_pause     = us_market_open_pause?(params)
+      evening_pause     = evening_pause?(params)
       # US MARKET OPEN PAUSE: configurable via trade_params.json (pause_us_market_open).
       # On 2026-03-20: 18W/4L (82% win rate) before 10AM ET → 2W/6L (25%) after US open.
       # BTC volatility spikes during US equity open, reducing Claude's prediction accuracy.
       # Adjust window via pause_us_market_open_start_et / pause_us_market_open_end_et.
+      #
+      # EVENING PAUSE: 8PM–midnight ET (00:00–04:00 UTC).
+      # Data (39 trades): 17W/22L (43.6%), -$11.49 total — worst window across all sessions.
+      # Configurable via pause_evening: true, pause_evening_start_et / pause_evening_end_et.
 
       # MIN ENTRY PRICE: blocks contrarian bets where we'd pay too little per token.
       # entry_price = cost of the token we're buying (UP price if BUY_YES, DOWN price if BUY_NO).
@@ -167,16 +172,21 @@ module MarketScanner
       min_entry   = params.fetch("min_entry_price", 0.0)
       entry_ok    = min_entry.zero? || entry_price >= min_entry
 
-      # UNCERTAIN ZONE FILTER: skip entries where entry_price is in the 0.40–0.55 range.
-      # Data (253 trades): fill 0.40–0.55 → -15.7% edge vs market implied, -$0.39/trade avg.
-      # fill < 0.40 → +7.9% edge (contrarian underdogs). fill > 0.55 → near break-even.
+      # UNCERTAIN ZONE FILTER: skip entries where entry_price is in the no-edge zone.
+      # Data (263 trades) by fill bucket:
+      #   <0.40  (contrarian): +$0.41/trade — ONLY profitable bucket
+      #   0.40–0.55 (uncertain): -$0.22/trade
+      #   0.56–0.70 (mid-high):  -$0.10/trade
+      #   >0.70   (favorite):    -$0.06/trade
+      # Filtering 0.40–0.65 removes the two negative middle buckets while keeping
+      # contrarians (<0.40) and high-conviction favorites (>0.65, marginally negative but consistent).
       # Configurable via skip_uncertain_min / skip_uncertain_max in trade_params.json.
       uncertain_min = params.fetch("skip_uncertain_min", 0.0).to_f
       uncertain_max = params.fetch("skip_uncertain_max", 0.0).to_f
       uncertain_ok  = uncertain_min.zero? || !(entry_price >= uncertain_min && entry_price <= uncertain_max)
 
       act = false
-      if !@traded_this_market && analysis && price_ok && entry_ok && uncertain_ok && !us_open_pause && time_left > too_late_secs
+      if !@traded_this_market && analysis && price_ok && entry_ok && uncertain_ok && !us_open_pause && !evening_pause && time_left > too_late_secs
         confidence = analysis[:confidence].to_f
         edge       = analysis[:edge].to_f.abs
 
@@ -194,7 +204,8 @@ module MarketScanner
       warn "\e[33m[Scanner] Skipping: UP price #{up_price} out of range [#{min_up}, #{max_up}]\e[0m" if !price_ok && analysis && !@traded_this_market
       warn "\e[33m[Scanner] Skipping: US market open pause (#{Time.now.getlocal("-04:00").strftime("%H:%M")} ET)\e[0m" if us_open_pause && analysis && !@traded_this_market && price_ok
       warn "\e[33m[Scanner] Skipping: entry price #{entry_price.round(2)} below min #{min_entry} (#{rec} contrarian)\e[0m" if !entry_ok && analysis && !@traded_this_market && price_ok && !us_open_pause
-      warn "\e[33m[Scanner] Skipping: entry price #{entry_price.round(2)} in uncertain zone [#{uncertain_min}–#{uncertain_max}] — no edge\e[0m" if !uncertain_ok && analysis && !@traded_this_market && price_ok && entry_ok && !us_open_pause
+      warn "\e[33m[Scanner] Skipping: entry price #{entry_price.round(2)} in uncertain zone [#{uncertain_min}–#{uncertain_max}] — no edge\e[0m" if !uncertain_ok && analysis && !@traded_this_market && price_ok && entry_ok && !us_open_pause && !evening_pause
+      warn "\e[33m[Scanner] Skipping: evening pause (#{Time.now.getlocal("-04:00").strftime("%H:%M")} ET)\e[0m" if evening_pause && analysis && !@traded_this_market && price_ok && entry_ok && uncertain_ok && !us_open_pause
 
       record_scan(market, up, btc, analysis, act, strategy["name"], dry_run) if analysis
       balance = dry_run ? simulated_balance : fetch_balance_cached
@@ -380,6 +391,29 @@ module MarketScanner
       end_mins   = end_str.split(":").then   { |h, m| h.to_i * 60 + m.to_i }
 
       now_mins >= start_mins && now_mins < end_mins
+    end
+
+    # -----------------------------------------------------------------------
+    # Evening pause (8PM–midnight ET by default)
+    # -----------------------------------------------------------------------
+    def evening_pause?(params)
+      return false unless params.fetch("pause_evening", false)
+
+      start_str = params.fetch("pause_evening_start_et", "20:00")
+      end_str   = params.fetch("pause_evening_end_et",   "23:59")
+
+      now_utc    = Time.now.utc
+      dst_active = now_utc.month > 3 && now_utc.month < 11 ||
+                   (now_utc.month == 3  && now_utc.day >= 8)  ||
+                   (now_utc.month == 11 && now_utc.day < 7)
+      offset     = dst_active ? -4 : -5
+      now_et     = now_utc + offset * 3600
+
+      now_mins   = now_et.hour * 60 + now_et.min
+      start_mins = start_str.split(":").then { |h, m| h.to_i * 60 + m.to_i }
+      end_mins   = end_str.split(":").then   { |h, m| h.to_i * 60 + m.to_i }
+
+      now_mins >= start_mins && now_mins <= end_mins
     end
 
     # Wallet balance — cached for 60s to avoid unnecessary auth calls
