@@ -8,6 +8,8 @@
   "min_up_price": 0.15,
   "max_up_price": 0.85,
   "min_entry_price": 0.30,
+  "min_entry_price_yes": 0.40,
+  "min_entry_price_no": 0.30,
   "early_entry_min_confidence": 0.82,
   "early_entry_min_edge": 0.25,
   "early_entry_min_series_points": 5,

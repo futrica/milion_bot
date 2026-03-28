@@ -165,11 +165,18 @@ module MarketScanner
 
       # MIN ENTRY PRICE: blocks contrarian bets where we'd pay too little per token.
       # entry_price = cost of the token we're buying (UP price if BUY_YES, DOWN price if BUY_NO).
-      # E.g. min_entry_price=0.25 blocks BUY_NO when UP>0.75 (DOWN costs <25¢ — big underdog).
+      # E.g. min_entry_price_no=0.30 blocks BUY_NO when UP>0.70 (DOWN costs <30¢ — big underdog).
       # On 2026-03-21: BUY_NO at DOWN=0.17 (UP=0.83) lost badly; would have been blocked.
+      # Directional split (2026-03-28): BUY_YES contrarian 0W/3L vs BUY_NO contrarian 1W/1L —
+      # YES contrarian bets (market says ~70% DOWN, bot bets UP) have no edge; raising YES min to 0.40.
+      # Use min_entry_price_yes / min_entry_price_no; falls back to min_entry_price if not set.
       rec         = analysis ? analysis[:recommendation].to_s : ""
       entry_price = rec == "BUY_YES" ? up_price : (1.0 - up_price)
-      min_entry   = params.fetch("min_entry_price", 0.0)
+      min_entry   = if rec == "BUY_YES"
+        params.fetch("min_entry_price_yes") { params.fetch("min_entry_price", 0.0) }
+      else
+        params.fetch("min_entry_price_no") { params.fetch("min_entry_price", 0.0) }
+      end
       entry_ok    = min_entry.zero? || entry_price >= min_entry
 
       # UNCERTAIN ZONE FILTER: skip entries where entry_price is in the no-edge zone.
@@ -203,7 +210,7 @@ module MarketScanner
 
       warn "\e[33m[Scanner] Skipping: UP price #{up_price} out of range [#{min_up}, #{max_up}]\e[0m" if !price_ok && analysis && !@traded_this_market
       warn "\e[33m[Scanner] Skipping: US market open pause (#{Time.now.getlocal("-04:00").strftime("%H:%M")} ET)\e[0m" if us_open_pause && analysis && !@traded_this_market && price_ok
-      warn "\e[33m[Scanner] Skipping: entry price #{entry_price.round(2)} below min #{min_entry} (#{rec} contrarian)\e[0m" if !entry_ok && analysis && !@traded_this_market && price_ok && !us_open_pause
+      warn "\e[33m[Scanner] Skipping: entry price #{entry_price.round(2)} below min_entry_#{rec == "BUY_YES" ? "yes" : "no"}=#{min_entry} (#{rec} contrarian)\e[0m" if !entry_ok && analysis && !@traded_this_market && price_ok && !us_open_pause
       warn "\e[33m[Scanner] Skipping: entry price #{entry_price.round(2)} in uncertain zone [#{uncertain_min}–#{uncertain_max}] — no edge\e[0m" if !uncertain_ok && analysis && !@traded_this_market && price_ok && entry_ok && !us_open_pause && !evening_pause
       warn "\e[33m[Scanner] Skipping: evening pause (#{Time.now.getlocal("-04:00").strftime("%H:%M")} ET)\e[0m" if evening_pause && analysis && !@traded_this_market && price_ok && entry_ok && uncertain_ok && !us_open_pause
 
