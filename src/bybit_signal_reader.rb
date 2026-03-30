@@ -22,6 +22,18 @@ module BybitSignalReader
     confidence = (confidence + boost).round(2)
     warn "[BybitSignal] Trend boost +#{boost.round(2)} → conf=#{confidence}" if boost > 0
 
+    # Determine signal source tag for prospective backtest analysis
+    raw_reasoning = signal["reasoning"].to_s
+    source = if raw_reasoning.start_with?("trend-only:")
+      "trend_only"
+    elsif raw_reasoning.start_with?("open position fallback")
+      "open_trade"
+    elsif boost > 0
+      "boosted+#{boost.round(2)}"
+    else
+      "active"
+    end
+
     # Implied probability from technical signal
     bybit_prob = direction == :long ? confidence : (1.0 - confidence)
 
@@ -44,7 +56,7 @@ module BybitSignalReader
       edge:           edge,
       recommendation: rec,
       confidence:     confidence,
-      reasoning:      "Bybit confluence: #{signal["reasoning"]}"
+      reasoning:      "[source:#{source}] #{raw_reasoning}"
     }
   rescue => e
     warn "[BybitSignal] Error: #{e.message}"
