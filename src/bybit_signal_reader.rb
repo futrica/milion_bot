@@ -17,6 +17,11 @@ module BybitSignalReader
 
     return nil if direction == :flat || confidence.zero?
 
+    # Trend boost: align confidence with Medium/Macro trend context
+    boost      = trend_boost(signal["reasoning"], direction)
+    confidence = (confidence + boost).round(2)
+    warn "[BybitSignal] Trend boost +#{boost.round(2)} → conf=#{confidence}" if boost > 0
+
     # Implied probability from technical signal
     bybit_prob = direction == :long ? confidence : (1.0 - confidence)
 
@@ -62,9 +67,54 @@ module BybitSignalReader
       warn "[BybitSignal] Signal stale (#{age}s) — checking open trades"
     end
 
-    open_trade_signal
+    open_trade_signal || trend_only_signal
   rescue => e
     warn "[BybitSignal] DB read failed: #{e.message}"
+    nil
+  end
+
+  def self.parse_trend(reasoning)
+    medium = reasoning&.[](/Medium=(bull|bear|neutral)/i, 1)&.downcase&.to_sym || :neutral
+    macro  = reasoning&.[](/Macro=(bull|bear|neutral)/i, 1)&.downcase&.to_sym  || :neutral
+    { medium: medium, macro: macro }
+  end
+
+  def self.trend_boost(reasoning, direction)
+    trend = parse_trend(reasoning)
+    boost = 0.0
+    boost += 0.05 if (direction == :long  && trend[:medium] == :bull) ||
+                     (direction == :short && trend[:medium] == :bear)
+    boost += 0.05 if (direction == :long  && trend[:macro]  == :bull) ||
+                     (direction == :short && trend[:macro]  == :bear)
+    boost
+  end
+
+  def self.trend_only_signal
+    db = SQLite3::Database.new(BYBIT_DB, readonly: true)
+    db.results_as_hash = true
+    row = db.execute(
+      "SELECT reasoning, timestamp FROM signals WHERE dry_run=0 ORDER BY id DESC LIMIT 1"
+    ).first
+    db.close
+    return nil unless row
+
+    age = Time.now.to_i - Time.parse(row["timestamp"]).to_i
+    return nil if age > MAX_AGE
+
+    trend = parse_trend(row["reasoning"])
+    if trend[:macro] == :bear && trend[:medium] == :bear
+      warn "[BybitSignal] Trend-only: short (Macro=bear Medium=bear)"
+      { "direction" => "short", "confidence" => 0.70,
+        "reasoning" => "trend-only: #{row["reasoning"]}",
+        "timestamp" => row["timestamp"] }
+    elsif trend[:macro] == :bull && trend[:medium] == :bull
+      warn "[BybitSignal] Trend-only: long (Macro=bull Medium=bull)"
+      { "direction" => "long", "confidence" => 0.70,
+        "reasoning" => "trend-only: #{row["reasoning"]}",
+        "timestamp" => row["timestamp"] }
+    end
+  rescue => e
+    warn "[BybitSignal] trend_only_signal failed: #{e.message}"
     nil
   end
 
