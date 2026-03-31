@@ -133,6 +133,8 @@ module BybitSignalReader
   # Fallback: if signal is stale, use the direction of the currently open trade.
   # The trades table has closed_at=NULL while a position is active — this is
   # source-of-truth for what bybit is actually doing right now.
+  # Applies trend_boost using the latest signal reasoning so that an open SHORT
+  # with Macro=bear + Medium=bear reaches conf=0.70 and passes the threshold.
   def self.open_trade_signal
     db = SQLite3::Database.new(BYBIT_DB, readonly: true)
     db.results_as_hash = true
@@ -141,14 +143,20 @@ module BybitSignalReader
        WHERE dry_run = 0 AND closed_at IS NULL
        ORDER BY id DESC LIMIT 1"
     ).first
+    trend_row = db.execute(
+      "SELECT reasoning FROM signals WHERE dry_run=0 ORDER BY id DESC LIMIT 1"
+    ).first
     db.close
     return nil unless trade
 
     direction = trade["direction"].to_s
     return nil if direction.empty? || direction == "flat"
 
-    warn "[BybitSignal] Using open trade direction: #{direction}"
-    { "direction" => direction, "confidence" => 0.6,
+    boost = trend_boost(trend_row&.dig("reasoning"), direction.to_sym)
+    conf  = (0.6 + boost).round(2)
+
+    warn "[BybitSignal] Using open trade direction: #{direction} (trend boost +#{boost.round(2)} → conf=#{conf})"
+    { "direction" => direction, "confidence" => conf,
       "reasoning" => "open position fallback (signal stale)",
       "timestamp" => Time.now.utc.iso8601 }
   rescue => e

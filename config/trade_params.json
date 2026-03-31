@@ -18,7 +18,7 @@
   "updated_by": null,
   "pause_us_market_open": true,
   "pause_us_market_open_start_et": "09:30",
-  "pause_us_market_open_end_et": "11:00",
+  "pause_us_market_open_end_et": "10:00",
   "skip_uncertain_min": 0.40,
   "skip_uncertain_max": 0.65,
   "pause_evening": true,
